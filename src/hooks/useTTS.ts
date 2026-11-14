@@ -1,0 +1,505 @@
+import { useRef, useCallback, useState, useEffect } from 'react';
+import { get, set } from 'idb-keyval';
+import { PersonaData, Message } from '../types';
+import { playAudioBase64, base64ToPCM16, downloadBlob, AudioPlaybackContext, clearAudioCacheFromStorage } from '../utils/audio';
+import { withRetry, checkIsRateLimited, checkIsQuotaExceeded, sanitizeApiKey, getGeminiClient } from '../utils/gemini';
+import { logger } from '../utils/logger';
+import { useToast } from '../components/Toast';
+
+interface UseTTSProps {
+  apiKey: string;
+  personas: Record<string, PersonaData>;
+  ttsVolume: number;
+  ttsSpeed: number;
+  audioModel: string;
+}
+
+export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: UseTTSProps) => {
+  const [isTTSLoading, setIsTTSLoading] = useState(false);
+  const [debatePlaybackState, setDebatePlaybackState] = useState<'idle' | 'playing'>('idle');
+  const [debateAudioSegments, setDebateAudioSegments] = useState<string[]>([]);
+  const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
+  const [isDownloadingAudio, setIsDownloadingAudio] = useState(false);
+  const { toast } = useToast();
+  const hasShownToastRef = useRef(false);
+
+  const playbackAbortController = useRef<AbortController | null>(null);
+  const lastPlayedIndexRef = useRef<number | null>(null);
+  const audioPlaybackRef = useRef<AudioPlaybackContext>({
+    audioCtx: null,
+    gainNode: null,
+    sourceNode: null
+  });
+  const audioCacheRef = useRef<Record<string, string>>({});
+  
+  // Track active promises to completely prevent duplicate API calls
+  const activePromisesRef = useRef<Record<string, Promise<string | null>>>({});
+
+  useEffect(() => {
+    if (audioPlaybackRef.current.gainNode) {
+      audioPlaybackRef.current.gainNode.gain.value = ttsVolume;
+    }
+  }, [ttsVolume]);
+
+  useEffect(() => {
+    if (audioPlaybackRef.current.sourceNode) {
+      audioPlaybackRef.current.sourceNode.playbackRate.value = ttsSpeed;
+    }
+  }, [ttsSpeed]);
+
+  const stopAudio = useCallback(() => {
+    if (playbackAbortController.current) {
+      playbackAbortController.current.abort();
+      playbackAbortController.current = null;
+    }
+    
+    try {
+      if (audioPlaybackRef.current.gainNode && audioPlaybackRef.current.audioCtx) {
+        const ctx = audioPlaybackRef.current.audioCtx;
+        const now = ctx.currentTime;
+        audioPlaybackRef.current.gainNode.gain.cancelScheduledValues(now);
+        audioPlaybackRef.current.gainNode.gain.setValueAtTime(audioPlaybackRef.current.gainNode.gain.value, now);
+        audioPlaybackRef.current.gainNode.gain.linearRampToValueAtTime(0, now + 0.015);
+      }
+      if (audioPlaybackRef.current.sourceNode) {
+        setTimeout(() => {
+          try {
+            audioPlaybackRef.current.sourceNode?.stop();
+            audioPlaybackRef.current.sourceNode?.disconnect();
+          } catch (e) {}
+        }, 16);
+      }
+      if (audioPlaybackRef.current.gainNode) {
+        setTimeout(() => {
+          try {
+            audioPlaybackRef.current.gainNode?.disconnect();
+          } catch (e) {}
+        }, 20);
+      }
+    } catch (e) {
+      // Ignore errors on cleanup
+    } finally {
+      audioPlaybackRef.current.audioCtx = null;
+      audioPlaybackRef.current.gainNode = null;
+      audioPlaybackRef.current.sourceNode = null;
+    }
+    
+    setDebatePlaybackState('idle');
+    setIsTTSLoading(false);
+    setSpeakingIndex(null);
+  }, []);
+
+  const clearAudioCache = useCallback(async () => {
+    audioCacheRef.current = {};
+    const count = await clearAudioCacheFromStorage();
+    toast({
+      type: 'success',
+      title: 'تم تصفير كاش الصوتيات',
+      message: count > 0 ? `تم مسح ${count} ملف صوتي من الكاش بنجاح. سيتم توليد مقاطع نظيفة وجديدة عند الاستماع.` : 'كاش الصوتيات نظيف وفارغ حالياً.'
+    });
+  }, [toast]);
+
+  const generateTTS = useCallback(async (text: string, personaKey: string, signal: AbortSignal): Promise<string | null> => {
+    // Versioned cache key (tts_v3) ensures no legacy unstripped audio chunks can ever be served
+    const cacheKey = `tts_v3_${personaKey}_${text.substring(0, 50)}_${text.length}`;
+    
+    // Check Memory Cache first
+    if (audioCacheRef.current[cacheKey]) {
+      return audioCacheRef.current[cacheKey];
+    }
+    
+    // IndexedDB Cache
+    try {
+      const cached = await get<string>(cacheKey);
+      if (cached) {
+        audioCacheRef.current[cacheKey] = cached;
+        return cached;
+      }
+    } catch (e) {
+      logger.warn("IDB read error", e);
+    }
+
+    // Active Promise Deduplicator
+    if (activePromisesRef.current[cacheKey]) {
+      logger.info(`Awaiting existing active generation promise for key: ${cacheKey}`);
+      return activePromisesRef.current[cacheKey];
+    }
+
+    const promise = (async () => {
+      try {
+        const ai = getGeminiClient(apiKey);
+        logger.info(`Initializing TTS request for persona: ${personaKey}`, { model: audioModel });
+        const persona = personas[personaKey];
+        const voiceNameRaw = persona?.voice || 'Puck';
+        const tone = persona?.ttsTone || 'تلقائي';
+        const personaPrompt = persona?.prompt || '';
+        
+        // Gemini API supports prebuilt voices: Puck, Charon, Kore, Fenrir, Aoede, Zephyr
+        const geminiAllowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'];
+        let voiceName = 'Puck';
+        
+        const foundVoice = geminiAllowedVoices.find(v => v.toLowerCase() === voiceNameRaw.toLowerCase());
+        if (foundVoice) {
+          voiceName = foundVoice;
+        } else {
+          // Deterministic mapping from the 30 list to one of the supported voices
+          let hash = 0;
+          for (let i = 0; i < voiceNameRaw.length; i++) {
+            hash = voiceNameRaw.charCodeAt(i) + ((hash << 5) - hash);
+          }
+          const index = Math.abs(hash) % geminiAllowedVoices.length;
+          voiceName = geminiAllowedVoices[index];
+        }
+        
+        const cleanText = text
+          .replace(/```[\s\S]*?```/g, '') // Remove code blocks
+          .replace(/[*#_`]/g, '')        // Remove markdown formatting
+          .replace(/^(تعليمات|ملاحظة|تنبيه|prompt|system):.*/gmi, '')
+          .trim();
+
+        let response: any;
+        const candidateAudioModels = Array.from(new Set([
+          audioModel || 'gemini-3.8-flash-tts',
+          'gemini-3.8-flash-tts',
+          'gemini-3.8-flash-lite-tts',
+          'gemini-3.1-flash-tts-preview'
+        ]));
+
+        let lastTTSModelError: any = null;
+        for (const modelCandidate of candidateAudioModels) {
+          try {
+            logger.info(`Attempting TTS generation with model: ${modelCandidate}`);
+            response = await withRetry(() => ai.models.generateContent({
+              model: modelCandidate,
+              contents: cleanText,
+              config: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: voiceName },
+                  },
+                },
+              },
+            }), 2, 1500);
+            
+            if (response?.data || response?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data) {
+              break;
+            }
+          } catch (error: any) {
+            lastTTSModelError = error;
+            logger.warn(`Failed TTS model attempt ${modelCandidate}:`, error?.message || error);
+          }
+        }
+
+        if (!response?.data && !response?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data) {
+          throw lastTTSModelError || new Error("لم يتم الحصول على بيانات صوتية من الخادم.");
+        }
+
+        if (signal?.aborted) return null;
+
+        const base64Audio = response.data || response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        
+        if (base64Audio) {
+          audioCacheRef.current[cacheKey] = base64Audio;
+          set(cacheKey, base64Audio).catch((e: unknown) => logger.warn("IDB write error", e));
+          return base64Audio;
+        } else {
+          throw new Error("لم يتم الحصول على بيانات صوتية من الخادم.");
+        }
+      } catch (error: any) {
+        logger.warn("TTS Generation Notice:", error?.message || error);
+        return null;
+      } finally {
+        delete activePromisesRef.current[cacheKey];
+      }
+    })();
+
+    activePromisesRef.current[cacheKey] = promise;
+    return promise;
+  }, [apiKey, personas, audioModel, toast]);
+
+  const playTTS = useCallback(async (base64Audio: string, signal: AbortSignal) => {
+    try {
+      await playAudioBase64(base64Audio, signal, ttsVolume, ttsSpeed, audioPlaybackRef);
+    } catch (err) {
+      logger.warn("Audio playback error:", err);
+    }
+  }, [ttsVolume, ttsSpeed]);
+
+  const handleSpeak = useCallback(async (
+    text: string, 
+    index: number, 
+    personaKey: string, 
+    currentActivePersona: string,
+    nextText?: string,
+    nextPersonaKey?: string
+  ) => {
+    if (speakingIndex === index || debatePlaybackState !== 'idle') {
+      stopAudio();
+      return;
+    }
+
+    stopAudio();
+    playbackAbortController.current = new AbortController();
+    const signal = playbackAbortController.current.signal;
+    const pKey = personaKey || currentActivePersona;
+
+    setIsTTSLoading(true);
+    setSpeakingIndex(index);
+    
+    const audio = await generateTTS(text, pKey, signal);
+    setIsTTSLoading(false);
+    
+    // Pre-generate the next one immediately as listening starts
+    if (nextText && nextPersonaKey && !signal.aborted) {
+      generateTTS(nextText, nextPersonaKey, signal).catch(() => {});
+    }
+
+    if (!signal.aborted) {
+      if (audio) {
+        await playTTS(audio, signal);
+      } else {
+        logger.warn('TTS Audio generation returned no data, skipping playback.');
+      }
+    }
+    
+    if (!signal.aborted) {
+      lastPlayedIndexRef.current = index;
+      setSpeakingIndex(null);
+    }
+  }, [speakingIndex, debatePlaybackState, stopAudio, generateTTS, playTTS]);
+
+  const handleSequentialSpeak = useCallback(async (
+    getMessages: () => Message[],
+    startIndex: number,
+    personaKey: string,
+    currentActivePersona: string,
+    onReachEnd?: () => void
+  ) => {
+    stopAudio();
+    playbackAbortController.current = new AbortController();
+    const signal = playbackAbortController.current.signal;
+    
+    let currentIndex = startIndex;
+    let reachEndTriggered = false;
+    
+    // Find the first valid message starting from startIndex
+    const initialMessages = getMessages();
+    while (currentIndex < initialMessages.length) {
+      const m = initialMessages[currentIndex];
+      if (!m.isSystem && m.role === 'model') {
+        break;
+      }
+      currentIndex++;
+    }
+
+    if (currentIndex >= initialMessages.length) {
+      if (onReachEnd) onReachEnd();
+      return;
+    }
+
+    // Locate the index of next valid model message
+    const findNextValidIndex = (fromIdx: number, msgs: Message[]): number => {
+      let idx = fromIdx;
+      while (idx < msgs.length) {
+        const m = msgs[idx];
+        if (!m.isSystem && m.role === 'model') {
+          return idx;
+        }
+        idx++;
+      }
+      return -1;
+    };
+
+    let firstMsg = initialMessages[currentIndex];
+    let nextAudioPromise = generateTTS(
+      firstMsg.text, 
+      firstMsg.persona || personaKey || currentActivePersona, 
+      signal
+    );
+
+    while (!signal.aborted) {
+      const currentMsgs = getMessages();
+      if (currentIndex >= currentMsgs.length) {
+        if (onReachEnd && !reachEndTriggered) {
+          reachEndTriggered = true;
+          onReachEnd();
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      reachEndTriggered = false;
+
+      const msg = currentMsgs[currentIndex];
+      if (msg.isSystem || msg.role !== 'model') {
+        currentIndex++;
+        const nextValidIdx = findNextValidIndex(currentIndex, currentMsgs);
+        if (nextValidIdx !== -1) {
+          const nextMsg = currentMsgs[nextValidIdx];
+          nextAudioPromise = generateTTS(
+            nextMsg.text, 
+            nextMsg.persona || personaKey || currentActivePersona, 
+            signal
+          );
+        }
+        continue;
+      }
+
+      const pKey = msg.persona || personaKey || currentActivePersona;
+      
+      setSpeakingIndex(msg.originalIndex || currentIndex);
+      setIsTTSLoading(true);
+      
+      // Await cached/active nextAudioPromise
+      const audio = await nextAudioPromise;
+      setIsTTSLoading(false);
+      
+      if (signal.aborted) break;
+
+      // At the exact moment preparation finishes and listening starts, prefetch next content
+      const nextValidIdx = findNextValidIndex(currentIndex + 1, currentMsgs);
+      if (nextValidIdx !== -1) {
+        const nextMsg = currentMsgs[nextValidIdx];
+        nextAudioPromise = generateTTS(
+          nextMsg.text, 
+          nextMsg.persona || personaKey || currentActivePersona, 
+          signal
+        );
+      } else {
+        if (onReachEnd && !reachEndTriggered) {
+          reachEndTriggered = true;
+          onReachEnd();
+        }
+      }
+
+      if (audio) {
+        await playTTS(audio, signal);
+      } else {
+        logger.warn('Sequential TTS returned no data for turn', currentIndex);
+      }
+
+      if (signal.aborted) break;
+
+      lastPlayedIndexRef.current = msg.originalIndex || currentIndex;
+      currentIndex++;
+    }
+    
+    setSpeakingIndex(null);
+  }, [generateTTS, playTTS, stopAudio]);
+
+  const handlePlayDebate = useCallback(async (messages: Message[], currentActivePersona: string) => {
+    if (debatePlaybackState === 'playing') {
+      stopAudio();
+      return;
+    }
+
+    setDebatePlaybackState('playing');
+    playbackAbortController.current = new AbortController();
+    const signal = playbackAbortController.current.signal;
+
+    const debateMsgs = messages.map((m, i) => ({...m, originalIndex: i})).filter(m => !m.isSystem);
+
+    let startIndex = 0;
+    
+    if (lastPlayedIndexRef.current !== null && lastPlayedIndexRef.current >= debateMsgs.length - 1) {
+       startIndex = 0;
+    } else if (speakingIndex !== null) {
+      const currentIndex = debateMsgs.findIndex(m => m.originalIndex === speakingIndex);
+      startIndex = currentIndex !== -1 ? currentIndex : 0;
+    } else if (lastPlayedIndexRef.current !== null) {
+      const currentIndex = debateMsgs.findIndex(m => m.originalIndex === lastPlayedIndexRef.current);
+      startIndex = currentIndex !== -1 ? currentIndex + 1 : 0;
+    }
+
+    const newSegments = [...debateAudioSegments];
+    
+    if (startIndex < debateMsgs.length) {
+      let nextAudioPromise = generateTTS(debateMsgs[startIndex].text, debateMsgs[startIndex].persona || currentActivePersona, signal);
+      
+      for (let i = startIndex; i < debateMsgs.length; i++) {
+        const msg = debateMsgs[i];
+        if (signal.aborted) break;
+        
+        setSpeakingIndex(msg.originalIndex!);
+        setIsTTSLoading(true);
+        
+        const audio = await nextAudioPromise;
+        setIsTTSLoading(false);
+        
+        if (signal.aborted) break;
+
+        if (audio) {
+          newSegments.push(audio);
+        }
+        
+        // At the exact moment preparation finishes and listening starts, pre-generate the next one
+        if (i + 1 < debateMsgs.length) {
+          const nextMsg = debateMsgs[i + 1];
+          nextAudioPromise = generateTTS(nextMsg.text, nextMsg.persona || currentActivePersona, signal);
+        }
+        
+        if (!signal.aborted) {
+          if (audio) {
+            await playTTS(audio, signal);
+          } else {
+            logger.warn('Debate TTS returned no audio data for turn', i);
+          }
+          if (!signal.aborted) {
+            lastPlayedIndexRef.current = msg.originalIndex!;
+          }
+        }
+      }
+    }
+    
+    setDebateAudioSegments(newSegments);
+
+    if (!signal.aborted) {
+      setDebatePlaybackState('idle');
+      setSpeakingIndex(null);
+    }
+  }, [debatePlaybackState, stopAudio, debateAudioSegments, speakingIndex, generateTTS, playTTS]);
+
+  const handleDownloadDebateAudio = useCallback(async (messages: Message[], currentActivePersona: string) => {
+    setIsDownloadingAudio(true);
+    try {
+      const debateMsgs = messages.map((m, i) => ({...m, originalIndex: i})).filter(m => !m.isSystem);
+      const base64Audios: string[] = [];
+      
+      const abortController = new AbortController();
+      for (const msg of debateMsgs) {
+        const audioBase64 = await generateTTS(msg.text, msg.persona || currentActivePersona, abortController.signal);
+        if (audioBase64) {
+          base64Audios.push(audioBase64);
+        }
+      }
+      
+      if (base64Audios.length > 0) {
+        const blob = base64ToPCM16(base64Audios);
+        if (blob) {
+          downloadBlob(blob, 'debate_full.pcm');
+        }
+      } else {
+        toast({ title: 'تنبيه', message: 'لم يتم العثور على صوتيات لتنزيلها.', type: 'info' });
+      }
+    } catch (e) {
+      logger.error("Audio download error", e);
+      toast({ title: 'خطأ', message: 'حدث خطأ أثناء تنزيل الصوتيات.', type: 'error' });
+    } finally {
+      setIsDownloadingAudio(false);
+    }
+  }, [generateTTS, toast]);
+
+  return {
+    isTTSLoading,
+    debatePlaybackState,
+    speakingIndex,
+    isDownloadingAudio,
+    handleSpeak,
+    handleSequentialSpeak,
+    handlePlayDebate,
+    stopAudio,
+    handleDownloadDebateAudio,
+    generateTTS,
+    clearAudioCache
+  };
+};
