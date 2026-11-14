@@ -39,6 +39,7 @@ export const UserProfilesModal: React.FC<UserProfilesModalProps> = ({
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState<Partial<UserProfile>>({});
   const [profileToDeleteId, setProfileToDeleteId] = useState<string | null>(null);
+  const [sessionToDelete, setSessionToDelete] = useState<{ profile: UserProfile; sessionId: string; title: string } | null>(null);
 
   // New Data source inputs
   const [newDsName, setNewDsName] = useState('');
@@ -205,7 +206,7 @@ export const UserProfilesModal: React.FC<UserProfilesModalProps> = ({
                         <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 font-bold ${
                           isSelected ? 'bg-accent text-bg' : 'bg-surface border border-border text-text'
                         }`}>
-                          {p.name.charAt(0)}
+                          {(p.name || '?').charAt(0)}
                         </div>
                         <div className="overflow-hidden">
                           <div className="font-bold text-xs text-text truncate flex items-center gap-1">
@@ -549,8 +550,9 @@ export const UserProfilesModal: React.FC<UserProfilesModalProps> = ({
                             </div>
 
                             <button
-                              onClick={() => handleRemoveSession(currentProfile, sess.id)}
+                              onClick={() => setSessionToDelete({ profile: currentProfile, sessionId: sess.id, title: sess.title })}
                               className="text-red-400 hover:text-red-300 p-1.5 rounded-lg hover:bg-surface2"
+                              title="حذف الجلسة المحفوظة"
                             >
                               <Trash2 size={14} />
                             </button>
@@ -584,6 +586,21 @@ export const UserProfilesModal: React.FC<UserProfilesModalProps> = ({
           }
         }}
         onCancel={() => setProfileToDeleteId(null)}
+      />
+
+      <ConfirmModal
+        isOpen={!!sessionToDelete}
+        title="حذف الجلسة المحفوظة"
+        message={`هل أنت متأكد من رغبتك في حذف الجلسة "${sessionToDelete?.title || ''}" من البروفايل نهائياً؟`}
+        confirmText="نعم، احذف الجلسة"
+        cancelText="إلغاء الأمر"
+        onConfirm={() => {
+          if (sessionToDelete) {
+            handleRemoveSession(sessionToDelete.profile, sessionToDelete.sessionId);
+            setSessionToDelete(null);
+          }
+        }}
+        onCancel={() => setSessionToDelete(null)}
       />
     </AnimatePresence>
   );

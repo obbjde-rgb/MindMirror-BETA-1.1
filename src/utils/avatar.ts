@@ -9,7 +9,13 @@ export const getAvatarUrl = (name: string, customUrl?: string) => {
   if (normalized.includes('فينشي') || name.toLowerCase().includes('vinci')) return '/portraits/davinci.jpg';
 
   // High-reliability local SVG data URI fallback (never breaks offline or in sandboxes)
-  const initial = name.trim().charAt(0) || '✦';
+  const rawInitial = name.trim().charAt(0) || '✦';
+  const initial = rawInitial
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect width="128" height="128" fill="#18181b"/><text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle" fill="#f4f4f5" font-family="system-ui,sans-serif" font-weight="700" font-size="52">${initial}</text></svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 };

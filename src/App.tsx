@@ -34,7 +34,7 @@ import { Message, PersonaData, VoiceName, UserProfile } from './types';
 import { initialPersonas, GEMINI_MODELS, DEFAULT_30_VOICES } from './constants';
 import { useTTS } from './hooks/useTTS';
 import { useVideoExport } from './hooks/useVideoExport';
-import { get, set } from 'idb-keyval';
+import { get, set, clear as clearIdb } from 'idb-keyval';
 
 import { logger } from './utils/logger';
 import { DebugConsole } from './components/DebugConsole';
@@ -704,11 +704,19 @@ export default function App() {
   });
 
   const [dynamicAudioModels, setDynamicAudioModels] = useState<string[]>(() => {
+    const defaultAudioModels = [
+      DEFAULT_AUDIO_MODEL,
+      'gemini-3.8-flash-tts',
+      'gemini-3.8-flash-lite-tts',
+      'gemini-3.1-flash-tts-preview',
+      'gemini-3.8-live',
+      'gemini-3.1-flash-live-preview'
+    ];
     const parsed = safeStorage.parseJSON<any[]>('mindmirror_dynamicAudioModels', []);
     if (parsed.length > 0) {
-      return Array.from(new Set([DEFAULT_MODEL, ...parsed, ...GEMINI_MODELS]));
+      return Array.from(new Set([...defaultAudioModels, ...parsed.filter(m => typeof m === 'string' && (m.includes('tts') || m.includes('live') || m.includes('audio')))]));
     }
-    return GEMINI_MODELS;
+    return Array.from(new Set(defaultAudioModels));
   });
 
   const [dynamicVoices, setDynamicVoices] = useState<string[]>(() => {
@@ -746,7 +754,11 @@ export default function App() {
           setDynamicModels(uniqueModels);
           safeStorage.setItem('mindmirror_dynamicModels', JSON.stringify(uniqueModels));
           
-          const uniqueAudioModels = Array.from(new Set([DEFAULT_MODEL, ...dynamicAudioModels, ...newModels.filter(m => m.includes('gemini'))]));
+          const uniqueAudioModels = Array.from(new Set([
+            DEFAULT_AUDIO_MODEL,
+            ...dynamicAudioModels,
+            ...newModels.filter(m => m.includes('tts') || m.includes('live') || m.includes('audio'))
+          ]));
           setDynamicAudioModels(uniqueAudioModels);
           safeStorage.setItem('mindmirror_dynamicAudioModels', JSON.stringify(uniqueAudioModels));
           
@@ -1440,9 +1452,9 @@ export default function App() {
           }
           
           if (responseText) {
-            const data = JSON.parse(responseText);
-            if (data.greeting) generatedGreeting = data.greeting;
-            if (data.suggestions && Array.isArray(data.suggestions)) generatedSuggestions = data.suggestions;
+            const data = parseJsonSafely<any>(responseText, {});
+            if (data?.greeting) generatedGreeting = data.greeting;
+            if (Array.isArray(data?.suggestions)) generatedSuggestions = data.suggestions;
           }
         } catch (e) {
           handleAIError(e, "تكوين الشخصية الجديدة");
@@ -1546,9 +1558,9 @@ export default function App() {
         }
         
         if (responseText) {
-          const data = JSON.parse(responseText);
-          if (data.greeting) generatedGreeting = data.greeting;
-          if (data.suggestions && Array.isArray(data.suggestions)) generatedSuggestions = data.suggestions;
+          const data = parseJsonSafely<any>(responseText, {});
+          if (data?.greeting) generatedGreeting = data.greeting;
+          if (Array.isArray(data?.suggestions)) generatedSuggestions = data.suggestions;
         }
       }
 
@@ -1616,9 +1628,10 @@ export default function App() {
     setShowClearChatConfirm(false);
   };
 
-  const handleFactoryReset = () => {
+  const handleFactoryReset = async () => {
     try {
       safeStorage.clear();
+      await Promise.allSettled([clearIdb(), clearAudioCacheFromStorage()]);
       if (typeof window !== 'undefined') {
         window.localStorage.clear();
         window.sessionStorage.clear();
@@ -1691,7 +1704,7 @@ export default function App() {
       prevPersonaRef.current = activePersona;
     } else if (activePersona !== 'debate' && activePersona !== 'group_question' && activePersona !== 'osint_room' && promptChanged) {
       if (personas[activePersona]) {
-        initializeChatSession(messages, activePersona);
+        initializeChatSession(history, activePersona);
       }
     } else if ((activePersona === 'debate' || activePersona === 'group_question' || activePersona === 'osint_room') && !isLoading) {
       setMessages(history);
@@ -1770,7 +1783,7 @@ export default function App() {
 
       if (!response) return;
       
-      const suggestions = JSON.parse(response.text || '[]');
+      const suggestions = parseJsonSafely<string[]>(response.text || '[]', []);
       if (Array.isArray(suggestions) && suggestions.length > 0) {
         const finalSuggestions = suggestions.slice(0, 3);
         setDynamicSuggestions(finalSuggestions);
@@ -2732,12 +2745,13 @@ ${answersText}`;
       }), 2, 1500);
       
       const summary = response?.text || '';
+      const summaryMsg: Message = { role: 'model', text: `📝 خلاصة الندوة والفوائد المستفادة:\n\n${summary}`, isSystem: true };
       setMessages(prev => {
         const updated = [...prev];
-        updated[updated.length - 1] = { ...updated[updated.length - 1], text: `📝 خلاصة الندوة والفوائد المستفادة:\n\n${summary}` };
+        updated[updated.length - 1] = summaryMsg;
         return updated;
       });
-      setChatHistory(prev => ({ ...prev, group_question: [...messages, { role: 'model', text: `📝 خلاصة الندوة والفوائد المستفادة:\n\n${summary}`, isSystem: true }] }));
+      setChatHistory(prev => ({ ...prev, group_question: [...(prev.group_question || []), summaryMsg] }));
     } catch (e) {
       handleAIError(e, "تلخيص الندوة الفكرية");
       setMessages(prev => prev.slice(0, -1));
@@ -2775,12 +2789,13 @@ ${debateText}`;
       }), 2, 1500);
       
       const summary = response?.text || '';
+      const summaryMsg: Message = { role: 'model', text: `📝 ملخص المناظرة والنتيجة:\n\n${summary}`, isSystem: true };
       setMessages(prev => {
         const updated = [...prev];
-        updated[updated.length - 1] = { ...updated[updated.length - 1], text: `📝 ملخص المناظرة والنتيجة:\n\n${summary}` };
+        updated[updated.length - 1] = summaryMsg;
         return updated;
       });
-      setChatHistory(prev => ({ ...prev, debate: [...messages, { role: 'model', text: `📝 ملخص المناظرة والنتيجة:\n\n${summary}`, isSystem: true }] }));
+      setChatHistory(prev => ({ ...prev, debate: [...(prev.debate || []), summaryMsg] }));
     } catch (e) {
       handleAIError(e, "تلخيص المناظرة");
       setMessages(prev => prev.slice(0, -1));
@@ -3137,12 +3152,13 @@ ${investigationText}`;
       
       const summary = (response as any)?.text || '';
       const finalMsgText = `📋 **التقرير الاستخباراتي الختامي (Executive Intelligence Brief):**\n\n${summary}`;
+      const reportMsg: Message = { role: 'model', text: finalMsgText, isSystem: true };
       setMessages(prev => {
         const updated = [...prev];
-        updated[updated.length - 1] = { ...updated[updated.length - 1], text: finalMsgText };
+        updated[updated.length - 1] = reportMsg;
         return updated;
       });
-      setChatHistory(prev => ({ ...prev, osint_room: [...messages, { role: 'model', text: finalMsgText, isSystem: true }] }));
+      setChatHistory(prev => ({ ...prev, osint_room: [...(prev.osint_room || []), reportMsg] }));
     } catch (e) {
       handleAIError(e, "توليد التقرير الاستخباراتي");
       setMessages(prev => prev.slice(0, -1));
@@ -3951,6 +3967,11 @@ ${investigationText}`;
           setDynamicVoices(updated);
           safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
         }}
+        onVoiceRemoved={(removedVoice: string) => {
+          const updated = dynamicVoices.filter(v => v !== removedVoice);
+          setDynamicVoices(updated);
+          safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
+        }}
         updateModelsAndVoices={updateModelsAndVoices}
         isUpdatingModels={isUpdatingModels}
         isApiKeyInvalid={isApiKeyInvalid}
@@ -4038,6 +4059,7 @@ ${investigationText}`;
         messageText={extractLessonModal.text}
         personaName={extractLessonModal.personaName}
         personaLabel={extractLessonModal.personaLabel}
+        apiKey={apiKey}
       />
 
       <AcademyLessonsModal
@@ -4048,7 +4070,7 @@ ${investigationText}`;
        {showLiveConversationModal && (
         <LiveConversationModal
           onClose={() => {
-            sessionStorage.removeItem('mindmirror_auto_open_live');
+            safeStorage.removeSessionItem('mindmirror_auto_open_live');
             setShowLiveConversationModal(false);
           }}
           activePersona={activePersona}
@@ -4120,6 +4142,7 @@ ${investigationText}`;
         isOpen={showPersonaComparisonModal}
         onClose={() => setShowPersonaComparisonModal(false)}
         personas={personas}
+        apiKey={apiKey}
       />
 
       <GroundedImageAssistantModal
@@ -4143,6 +4166,7 @@ ${investigationText}`;
         onStartTrendRoom={startTrendLiveRoom}
         isStrictModelMode={isStrictModelMode}
         model={model}
+        apiKey={apiKey}
       />
 
       {/* PodLive Digital Audio & Podcast Studio Modal 2026 */}

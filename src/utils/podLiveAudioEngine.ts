@@ -108,11 +108,19 @@ export class PodLiveAudioEngine {
   private streamDestination: MediaStreamAudioDestinationNode | null = null;
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
+  private recordedMimeType: string = 'audio/webm';
 
   public getAudioContext(): AudioContext {
     if (!this.ctx || this.ctx.state === 'closed') {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
       this.ctx = new AudioCtxClass();
+      this.isInitialized = false;
+      this.analyser = null;
+      this.streamDestination = null;
+      this.lowCutFilter = null;
+      this.ambientGain = null;
+      this.ambientDuckingGain = null;
+      this.sfxGainNode = null;
     }
     if (this.ctx.state === 'suspended') {
       this.ctx.resume();
@@ -896,12 +904,17 @@ export class PodLiveAudioEngine {
 
   // Master Session Recording
   public startMasterRecording() {
-    if (!this.streamDestination) return;
+    if (!this.streamDestination || typeof MediaRecorder === 'undefined') return;
     this.recordedChunks = [];
     try {
-      this.mediaRecorder = new MediaRecorder(this.streamDestination.stream, {
-        mimeType: 'audio/webm;codecs=opus'
-      });
+      const candidateTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+      const supportedType = typeof MediaRecorder.isTypeSupported === 'function'
+        ? candidateTypes.find(t => MediaRecorder.isTypeSupported(t))
+        : undefined;
+      this.recordedMimeType = supportedType || 'audio/webm';
+      this.mediaRecorder = supportedType
+        ? new MediaRecorder(this.streamDestination.stream, { mimeType: supportedType })
+        : new MediaRecorder(this.streamDestination.stream);
       this.mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
           this.recordedChunks.push(e.data);
@@ -919,8 +932,9 @@ export class PodLiveAudioEngine {
         resolve(null);
         return;
       }
+      const mimeType = this.mediaRecorder.mimeType || this.recordedMimeType || 'audio/webm';
       this.mediaRecorder.onstop = () => {
-        const fullBlob = new Blob(this.recordedChunks, { type: 'audio/webm' });
+        const fullBlob = new Blob(this.recordedChunks, { type: mimeType });
         this.recordedChunks = [];
         resolve(fullBlob);
       };

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, Square, Play, Pause, Trash2, RotateCcw, Upload, CheckCircle2, AlertCircle, Volume2, Copy, Check } from 'lucide-react';
+import { copyToClipboard } from '../utils/clipboard';
 
 interface VoiceSampleRecorderProps {
   label: string;
@@ -126,13 +127,15 @@ export const VoiceSampleRecorder: React.FC<VoiceSampleRecorderProps> = ({
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioUrlRef = useRef<string | null>(null);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       cleanupStreams();
-      if (audioUrl) {
-        URL.revokeObjectURL(audioUrl);
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = null;
       }
     };
   }, []);
@@ -141,9 +144,14 @@ export const VoiceSampleRecorder: React.FC<VoiceSampleRecorderProps> = ({
   useEffect(() => {
     if (file) {
       const url = URL.createObjectURL(file);
+      audioUrlRef.current = url;
       setAudioUrl(url);
-      return () => URL.revokeObjectURL(url);
+      return () => {
+        URL.revokeObjectURL(url);
+        if (audioUrlRef.current === url) audioUrlRef.current = null;
+      };
     } else {
+      audioUrlRef.current = null;
       setAudioUrl(null);
       setAudioDuration(null);
       setIsPlaying(false);
@@ -328,7 +336,7 @@ export const VoiceSampleRecorder: React.FC<VoiceSampleRecorderProps> = ({
 
   const handleCopyStatement = () => {
     if (!statementToRead) return;
-    navigator.clipboard.writeText(statementToRead);
+    copyToClipboard(statementToRead);
     setCopiedStatement(true);
     setTimeout(() => setCopiedStatement(false), 2000);
   };

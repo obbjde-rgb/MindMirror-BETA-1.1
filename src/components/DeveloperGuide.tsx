@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Code, Terminal, Key, BookOpen, ArrowRight, Check, Copy, ArrowLeft, User, Send, Sparkles, Box } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { copyToClipboard } from '../utils/clipboard';
 
 export default function DeveloperGuide() {
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
 
   const handleCopy = (code: string, sectionId: string) => {
-    navigator.clipboard.writeText(code);
+    copyToClipboard(code);
     setCopiedSection(sectionId);
     setTimeout(() => setCopiedSection(null), 2000);
   };

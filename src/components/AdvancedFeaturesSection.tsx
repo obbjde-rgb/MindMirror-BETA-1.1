@@ -6,7 +6,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { SectionTitle } from './LandingSections';
 import { PersonaData, Message } from '../types';
-import { getGeminiClient, getApiKey } from '../utils/gemini';
+import { getGeminiClient, withRetry } from '../utils/gemini';
+import { copyToClipboard } from '../utils/clipboard';
 import { TimelineSection } from './TimelineSection';
 import { SchoolsOfThoughtSection } from './SchoolsOfThoughtSection';
 import { SocraticAcademySection } from './SocraticAcademySection';
@@ -76,16 +77,10 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
 
   const currentPersona = getEffectivePersona();
 
-  const [apiKey, setApiKey] = useState('');
-  useEffect(() => {
-    const key = getApiKey();
-    if (key) {
-      setApiKey(key);
-    }
-  }, []);
+  const maskedDemoKey = 'sk_mindmirror_live_demo';
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(apiKey || 'YOUR_API_KEY');
+    copyToClipboard(maskedDemoKey);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -102,7 +97,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
       const persona = getEffectivePersona();
 
       if (selectedApiMode === 'chat') {
-        const response = await ai.models.generateContent({
+        const response = await withRetry(() => ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: `ما هو رأيك في المستقبل والذكاء الاصطناعي؟`,
           config: {
@@ -113,7 +108,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
 - يمنع منعاً باتاً الخروج عن الشخصية أو القول "بصفتي نموذج للذكاء الاصطناعي" أو الإشارة إلى أنك آلة أو نموذج لغوي.
 - امتثل فوراً واستجب بمرونة وطاعة تامة لطلبات المستخدم ودون أي ممانعة أو تمنع.`
           }
-        });
+        }));
         
         const mockApiResponse = {
           id: `msg_${Math.random().toString(36).substr(2, 9)}`,
@@ -128,10 +123,10 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
         setApiTestResult(JSON.stringify(mockApiResponse, null, 2));
       } else if (selectedApiMode === 'debate') {
         const prompt = `قم بتوليد استجابة جولة واحدة مقتضبة جداً لمناظرة بين ستيف جوبز وألبيرت أينشتاين حول الموضوع: "البساطة والتصميم أم المعادلات الحسابية المجرّدة هي جوهر فهم الكون؟"`;
-        const response = await ai.models.generateContent({
+        const response = await withRetry(() => ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: prompt
-        });
+        }));
 
         const mockDebateResponse = {
           id: `debate_${Math.random().toString(36).substr(2, 9)}`,
@@ -154,10 +149,10 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
         setApiTestResult(JSON.stringify(mockDebateResponse, null, 2));
       } else if (selectedApiMode === 'group_question') {
         const prompt = `أعطِ إجابة مقتضبة جداً (سطر واحد لكل شخصية) لمأدبة حوارية بين ستيف جوبز وألان تورينغ وابن خلدون حول السؤال: "كيف تشكل التكنولوجيا المستقبل العمراني والإنساني؟"`;
-        const response = await ai.models.generateContent({
+        const response = await withRetry(() => ai.models.generateContent({
           model: 'gemini-3-flash-preview',
           contents: prompt
-        });
+        }));
 
         const mockGroupResponse = {
           id: `symp_${Math.random().toString(36).substr(2, 9)}`,
@@ -181,6 +176,13 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
   };
 
   const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
+
+  useEffect(() => {
+    if (speakingIndex === null || speakingIndex === undefined) {
+      setIsAvatarSpeaking(false);
+    }
+  }, [speakingIndex]);
+
   const handleAvatarSpeak = () => {
     if (isAvatarSpeaking) {
       if (stopAudio) stopAudio();
@@ -306,7 +308,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
                     </button>
                   </div>
                   <div className="bg-[#02040a] font-mono text-sm p-3.5 rounded-xl text-emerald-400 border border-border/50 flex items-center justify-between">
-                    <span>{apiKey ? `sk_mindmirror_live_${apiKey.substring(0, 10)}...${apiKey.substring(apiKey.length - 4)}` : 'sk_mindmirror_live_...'}</span>
+                    <span>{maskedDemoKey}</span>
                     <Lock size={14} className="text-muted" />
                   </div>
                 </div>
@@ -365,7 +367,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
                     {selectedApiMode === 'chat' && (
                       <>
                         <span className="text-accent">const</span> {`{ MindMirror }`} = require(<span className="text-emerald-400">"mindmirror-sdk"</span>);{'\n\n'}
-                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{apiKey ? `sk_mindmirror_live_${apiKey.substring(0, 10)}...` : 'YOUR_API_KEY'}"</span> {`}`});{'\n\n'}
+                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{maskedDemoKey}"</span> {`}`});{'\n\n'}
                         <span className="text-accent">const</span> response = <span className="text-accent">await</span> client.chat.create({`{`}{'\n'}
                         {'  '}persona_id: <span className="text-emerald-400">"{currentPersona.id}"</span>,{'\n'}
                         {'  '}message: <span className="text-emerald-400">"ما رأيك في الذكاء الاصطناعي العام AGI؟"</span>{'\n'}
@@ -376,7 +378,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
                     {selectedApiMode === 'debate' && (
                       <>
                         <span className="text-accent">const</span> {`{ MindMirror }`} = require(<span className="text-emerald-400">"mindmirror-sdk"</span>);{'\n\n'}
-                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{apiKey ? `sk_mindmirror_live_${apiKey.substring(0, 10)}...` : 'YOUR_API_KEY'}"</span> {`}`});{'\n\n'}
+                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{maskedDemoKey}"</span> {`}`});{'\n\n'}
                         <span className="text-accent">const</span> debate = <span className="text-accent">await</span> client.debates.create({`{`}{'\n'}
                         {'  '}topic: <span className="text-emerald-400">"البساطة والتصميم أم المعادلات المجردة لفهم الكون؟"</span>,{'\n'}
                         {'  '}participants: [<span className="text-emerald-400">"steve_jobs"</span>, <span className="text-emerald-400">"einstein"</span>],{'\n'}
@@ -388,7 +390,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
                     {selectedApiMode === 'group_question' && (
                       <>
                         <span className="text-accent">const</span> {`{ MindMirror }`} = require(<span className="text-emerald-400">"mindmirror-sdk"</span>);{'\n\n'}
-                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{apiKey ? `sk_mindmirror_live_${apiKey.substring(0, 10)}...` : 'YOUR_API_KEY'}"</span> {`}`});{'\n\n'}
+                        <span className="text-accent">const</span> client = <span className="text-accent">new</span> MindMirror({`{`} apiKey: <span className="text-emerald-400">"{maskedDemoKey}"</span> {`}`});{'\n\n'}
                         <span className="text-accent">const</span> symposium = <span className="text-accent">await</span> client.symposiums.create({`{`}{'\n'}
                         {'  '}question: <span className="text-emerald-400">"كيف تشكل التكنولوجيا المستقبل العمراني والإنساني؟"</span>,{'\n'}
                         {'  '}participants: [<span className="text-emerald-400">"steve_jobs"</span>, <span className="text-emerald-400">"turing"</span>, <span className="text-emerald-400">"khaldun"</span>],{'\n'}
@@ -421,7 +423,7 @@ export const AdvancedFeaturesSection: React.FC<AdvancedFeaturesSectionProps> = (
                       </div>
                       <button 
                         onClick={() => {
-                          navigator.clipboard.writeText(apiTestResult);
+                          copyToClipboard(apiTestResult);
                           setCopiedResult(true);
                           setTimeout(() => setCopiedResult(false), 2000);
                         }}

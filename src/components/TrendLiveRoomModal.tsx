@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { getAvatarUrl } from '../utils/avatar';
 import { getGeminiClient, withRetry, parseJsonSafely, normalizeGeminiModel } from '../utils/gemini';
+import { safeStorage } from '../utils/storage';
 import { useToast } from './Toast';
 
 export interface TrendTopic {
@@ -38,6 +39,7 @@ interface TrendLiveRoomModalProps {
   onStartTrendRoom?: (trend: TrendTopic, initialMessages?: any[]) => void;
   isStrictModelMode?: boolean;
   model?: string;
+  apiKey?: string;
 }
 
 const DEFAULT_PRESET_TRENDS: TrendTopic[] = [
@@ -88,15 +90,16 @@ export default function TrendLiveRoomModal({
   isLoading = false,
   onStartTrendRoom,
   isStrictModelMode = false,
-  model = 'gemini-3-flash-preview'
+  model = 'gemini-3-flash-preview',
+  apiKey = ''
 }: TrendLiveRoomModalProps) {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<'radar' | 'room' | 'create'>('radar');
   const [trends, setTrends] = useState<TrendTopic[]>(() => {
     try {
-      const saved = localStorage.getItem('mindmirror_trendLive_topics');
+      const saved = safeStorage.getItem('mindmirror_trendLive_topics');
       if (saved) {
-        const parsed = JSON.parse(saved);
+        const parsed = parseJsonSafely<TrendTopic[]>(saved);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch (e) {
@@ -121,7 +124,7 @@ export default function TrendLiveRoomModal({
 
   useEffect(() => {
     try {
-      localStorage.setItem('mindmirror_trendLive_topics', JSON.stringify(trends));
+      safeStorage.setItem('mindmirror_trendLive_topics', JSON.stringify(trends));
     } catch (e) {
       // ignore
     }
@@ -181,11 +184,11 @@ export default function TrendLiveRoomModal({
     });
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const prompt = `أنت محرك اكتشاف الترندات الاستباقي (RTTP & TrendSpotter Live Engine).
 المطلوب: اكتشاف ورصد 3 تريندات أو أحداث صاعدة (في مجالات التقنية، الذكاء الاصطناعي، العلوم، الطاقة، الصحة، أو القضايا العامة العالمية والعربية) التي تبدأ بإشارات ضعيفة قبل تحولها لترند جماهيري، وتوليد طاقم شخصيات رقمية مناسب لكل منها.
 
-أعد مصفوفة JSON تحتوي على 3 عناصر تماماً مطابقة للهيكل التالي:
+أعد مصفوفة JSON تحتوي على 3 عناصر تماماً مطابقة للهيكل التالي (القيم المسموحة لـ riskLevel هي: "منخفض" أو "متوسط" أو "مرتفع"، والقيم المسموحة لـ verificationStatus هي: "قيد التحقق" أو "تم التحقق" أو "مضلل"):
 [
   {
     "id": "trend_${Date.now()}_1",
@@ -194,8 +197,8 @@ export default function TrendLiveRoomModal({
     "confidence": 94,
     "sentiment": "الحالة الشعورية (مثال: قلق وترقب، أمل وانبهار، غضب وجدل)",
     "sentimentScore": 0.4,
-    "riskLevel": "منخفض" أو "متوسط" أو "مرتفع",
-    "verificationStatus": "قيد التحقق" أو "تم التحقق" أو "مضلل",
+    "riskLevel": "متوسط",
+    "verificationStatus": "قيد التحقق",
     "sourceAuthority": 0.88,
     "weakSignalSource": "توصيف دقيق للإشارة الضعيفة الأولى ومكان التقاطها",
     "syntheticQueries": ["استعلام بحث اصطناعي 1", "استعلام بحث اصطناعي 2"],
@@ -231,7 +234,6 @@ export default function TrendLiveRoomModal({
       }
     } catch (err: any) {
       console.error('Trend Scan Error:', err);
-      const isDaily = err.isDailyLimit || String(err?.message || '').includes('per day limit exceeded');
       toast({
         title: 'تنبيه الاتصال بالخدمة',
         message: 'تعذر التقاط ترندات جديدة حالياً، جاري استخدام البيانات الحالية الموثقة أو يرجى المحاولة لاحقاً.',
@@ -248,14 +250,14 @@ export default function TrendLiveRoomModal({
     setIsCreatingTopic(true);
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const prompt = `أنت محرك الذكاء الاستباقي للترندات (RTTP + TrendSpotter).
 قام المستخدم بإدخال الموضوع التالي لفتح غرفة تريند لايف حوله:
 "${customTopicInput}"
 
 المطلوب: إجراء تحليل خماسي الطبقات (الاستشعار RTTP، البنية الدلالية TrendSpotter، التقييم والمخاطر، التخصيص، وتوليد طاقم من 3-4 شخصيات رقمية متخصصة ومتحقق).
 
-أعد كائن JSON فقط مطابق للنموذج التالي:
+أعد كائن JSON فقط مطابق للنموذج التالي (القيم المسموحة لـ riskLevel هي "منخفض" أو "متوسط" أو "مرتفع"، و verificationStatus هي "قيد التحقق" أو "تم التحقق"):
 {
   "id": "custom_${Date.now()}",
   "title": "${customTopicInput}",
@@ -263,8 +265,8 @@ export default function TrendLiveRoomModal({
   "confidence": 92,
   "sentiment": "الحالة الشعورية السائدة",
   "sentimentScore": 0.2,
-  "riskLevel": "منخفض" أو "متوسط" أو "مرتفع",
-  "verificationStatus": "قيد التحقق" أو "تم التحقق",
+  "riskLevel": "متوسط",
+  "verificationStatus": "قيد التحقق",
   "sourceAuthority": 0.85,
   "weakSignalSource": "توصيف الإشارات الأولى والروابط المرصودة",
   "syntheticQueries": ["استعلام بحث 1", "استعلام بحث 2"],
@@ -320,7 +322,7 @@ export default function TrendLiveRoomModal({
     setIsAiGeneratingTurn(true);
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const crew = selectedTrend.suggestedCrew;
       // Pick best matching persona based on intent
       let chosenPersona = crew[0];
@@ -389,7 +391,7 @@ ${recentChat}
     setIsAiGeneratingTurn(true);
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const crew = selectedTrend.suggestedCrew;
       const lastMsg = roomMessages[roomMessages.length - 1];
       const nextIndex = (crew.findIndex(c => c.name === lastMsg?.sender) + 1) % crew.length;
@@ -441,7 +443,7 @@ ${recentTranscript}
     });
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const prompt = `أنت شخصية "المتحقق الرقمي المستقل" في نظام التحقق متعدد الوكلاء (SLED Framework).
 موضوع التحقق والادعاء المرصود:
 "${selectedTrend.title}"
@@ -450,12 +452,12 @@ ${recentTranscript}
 
 المطلوب منك:
 1. تقييم صدقية الادعاء وفق الحقائق والمنطق ومصادر الأرشيف.
-2. تحديد حكم التحقق النهائي: هل هو "تم التحقق (مؤكد)"، أم "مضلل / فوتوشوب / سياق كاذب"، أم "قيد التحقق (غير مؤكد)".
+2. تحديد حكم التحقق النهائي: هل هو "تم التحقق"، أم "مضلل"، أم "قيد التحقق".
 3. كتابة خلاصة تدقيقية جراحية مدعمة بنقاط محددة توضح ما ثبت وما لم يثبت وحدود المعرفة الحالية.
 
-أعد كائن JSON فقط:
+أعد كائن JSON فقط (القيم المسموحة لـ verdictStatus هي: "تم التحقق" أو "مضلل" أو "قيد التحقق"):
 {
-  "verdictStatus": "تم التحقق" أو "مضلل" أو "قيد التحقق",
+  "verdictStatus": "تم التحقق",
   "confidenceScore": 95,
   "summaryText": "خلاصة التدقيق والأدلة المقاطعة بأسلوب بليغ في 3-4 أسطر",
   "evidencePoints": ["دليل 1 أو وثيقة", "دليل 2 أو مقارنة تاريخية"]

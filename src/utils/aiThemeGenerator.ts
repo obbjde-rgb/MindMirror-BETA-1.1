@@ -1,6 +1,8 @@
 // Advanced Generative AI Color Engine for MindMirror
 // Procedurally calculates vibrant, high-contrast, non-repeating mixed paint/duotone/gradient color palettes
 
+import { safeStorage } from './storage';
+
 export interface AIThemePalette {
   name: string;
   category: string;
@@ -190,15 +192,15 @@ export function applyAITheme(palette: AIThemePalette) {
   root.style.setProperty('--glow-gradient', palette.glowGradient);
 
   try {
-    localStorage.setItem('mindmirror_ai_custom_theme', JSON.stringify(palette));
+    safeStorage.setItem('mindmirror_ai_custom_theme', JSON.stringify(palette));
   } catch (e) {}
 }
 
 export function loadSavedAITheme(): AIThemePalette | null {
   try {
-    const saved = localStorage.getItem('mindmirror_ai_custom_theme');
-    if (saved) {
-      return JSON.parse(saved);
+    const parsed = safeStorage.getJson<AIThemePalette | null>('mindmirror_ai_custom_theme', null);
+    if (parsed && typeof parsed === 'object' && parsed.bg) {
+      return parsed;
     }
   } catch (e) {}
   return null;

@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { logger } from '../utils/logger';
+import { safeStorage } from '../utils/storage';
 
 interface Props {
   children: ReactNode;
@@ -8,15 +9,17 @@ interface Props {
 interface State {
   hasError: boolean;
   error: Error | null;
+  confirmReset: boolean;
 }
 
 class ErrorBoundary extends Component<Props, State> {
   public state: State = {
     hasError: false,
-    error: null
+    error: null,
+    confirmReset: false
   };
 
-  public static getDerivedStateFromError(error: Error): State {
+  public static getDerivedStateFromError(error: Error): Partial<State> {
     return { hasError: true, error };
   }
 
@@ -27,7 +30,6 @@ class ErrorBoundary extends Component<Props, State> {
   private handleCleanReload = () => {
     try {
       if (typeof window !== 'undefined') {
-        // Strip any hash or problematic query params to ensure clean reload to root
         window.location.href = window.location.origin + '/';
       }
     } catch (e) {
@@ -38,13 +40,11 @@ class ErrorBoundary extends Component<Props, State> {
   private handleHardReset = () => {
     try {
       if (typeof window !== 'undefined') {
-        // Clear runtime state keys that could cause invalid JSON parse loops
-        localStorage.removeItem('mindmirror_history');
-        localStorage.removeItem('mindmirror_debateConfig');
-        localStorage.removeItem('mindmirror_osintRoomConfig');
-        localStorage.removeItem('mindmirror_groupQuestionConfig');
-        sessionStorage.clear();
-        
+        safeStorage.removeItem('mindmirror_history');
+        safeStorage.removeItem('mindmirror_debateConfig');
+        safeStorage.removeItem('mindmirror_osintRoomConfig');
+        safeStorage.removeItem('mindmirror_groupQuestionConfig');
+        safeStorage.clear();
         window.location.href = window.location.origin + '/';
       }
     } catch (e) {
@@ -92,41 +92,87 @@ class ErrorBoundary extends Component<Props, State> {
               تم استعادة واستقرار النظام. اضغط على الزر أدناه للدخول المباشر إلى المنصة على الرابط الرئيسي.
             </p>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              <button 
-                onClick={this.handleCleanReload}
-                style={{
-                  backgroundColor: '#38bdf8',
-                  color: '#02040a',
-                  padding: '0.85rem 1.5rem',
-                  borderRadius: '0.75rem',
-                  fontWeight: 700,
-                  fontSize: '1rem',
-                  border: 'none',
-                  cursor: 'pointer',
-                  boxShadow: '0 4px 14px rgba(56, 189, 248, 0.25)',
-                  transition: 'all 0.2s'
-                }}
-              >
-                الدخول إلى الرابط الرئيسي المباشر
-              </button>
+            {this.state.confirmReset ? (
+              <div style={{
+                backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.35)',
+                borderRadius: '1rem',
+                padding: '1rem',
+                marginBottom: '1rem'
+              }}>
+                <p style={{ fontSize: '0.85rem', color: '#fca5a5', marginBottom: '0.85rem', lineHeight: '1.5' }}>
+                  هل أنت متأكد من تصفير الذاكرة المؤقتة؟ سيؤدي هذا إلى مسح الجلسات والبيانات المخزنة محلياً.
+                </p>
+                <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'center' }}>
+                  <button
+                    onClick={() => this.setState({ confirmReset: false })}
+                    style={{
+                      backgroundColor: 'rgba(255, 255, 255, 0.08)',
+                      color: '#e2e8f0',
+                      padding: '0.5rem 1rem',
+                      borderRadius: '0.6rem',
+                      fontWeight: 600,
+                      fontSize: '0.8rem',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    إلغاء
+                  </button>
+                  <button
+                    onClick={this.handleHardReset}
+                    style={{
+                      backgroundColor: '#ef4444',
+                      color: '#ffffff',
+                      padding: '0.5rem 1rem',
+                      borderRadius: '0.6rem',
+                      fontWeight: 700,
+                      fontSize: '0.8rem',
+                      border: 'none',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    تأكيد التصفير
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                <button 
+                  onClick={this.handleCleanReload}
+                  style={{
+                    backgroundColor: '#38bdf8',
+                    color: '#02040a',
+                    padding: '0.85rem 1.5rem',
+                    borderRadius: '0.75rem',
+                    fontWeight: 700,
+                    fontSize: '1rem',
+                    border: 'none',
+                    cursor: 'pointer',
+                    boxShadow: '0 4px 14px rgba(56, 189, 248, 0.25)',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  الدخول إلى الرابط الرئيسي المباشر
+                </button>
 
-              <button 
-                onClick={this.handleHardReset}
-                style={{
-                  backgroundColor: 'rgba(255, 255, 255, 0.06)',
-                  color: '#94a3b8',
-                  padding: '0.65rem 1.25rem',
-                  borderRadius: '0.75rem',
-                  fontWeight: 600,
-                  fontSize: '0.85rem',
-                  border: '1px solid rgba(255, 255, 255, 0.12)',
-                  cursor: 'pointer'
-                }}
-              >
-                إعادة ضبط الذاكرة المؤقتة والتشغيل النظيف
-              </button>
-            </div>
+                <button 
+                  onClick={() => this.setState({ confirmReset: true })}
+                  style={{
+                    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+                    color: '#94a3b8',
+                    padding: '0.65rem 1.25rem',
+                    borderRadius: '0.75rem',
+                    fontWeight: 600,
+                    fontSize: '0.85rem',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    cursor: 'pointer'
+                  }}
+                >
+                  إعادة ضبط الذاكرة المؤقتة والتشغيل النظيف
+                </button>
+              </div>
+            )}
           </div>
         </div>
       );

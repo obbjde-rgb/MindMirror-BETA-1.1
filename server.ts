@@ -29,10 +29,25 @@ async function startServer() {
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // System API Key Pool with Silent Background Rotation and Dynamic Auto-Discovery
+  const explicitKeyNames = new Set([
+    'GEMINI_API_KEY',
+    'AISTUDIO_API_KEY',
+    'APPLET_API_KEY',
+    'PROJECT_API_KEY',
+    'GEMINI_API_KEY_ALT',
+    'GOOGLE_API_KEY',
+  ]);
+  const isLikelyApiKey = (val: string) =>
+    val.length >= 20 &&
+    !val.includes('/') &&
+    !val.includes('\\') &&
+    !/\s/.test(val) &&
+    (/^AIza[0-9A-Za-z_-]{20,}$/.test(val) || /^[A-Za-z0-9_-]{24,}$/.test(val));
+
   const discoveredEnvKeys = Object.keys(process.env)
-    .filter(k => (k.includes("GEMINI") || k.includes("GOOGLE") || k.includes("API_KEY")) && typeof process.env[k] === "string")
+    .filter(k => (explicitKeyNames.has(k) || k.endsWith('_API_KEY') || k.startsWith('GEMINI_API_KEY')) && typeof process.env[k] === "string")
     .map(k => (process.env[k] || "").trim())
-    .filter(k => k.length > 10);
+    .filter(isLikelyApiKey);
 
   const SYSTEM_KEYS = Array.from(new Set([
     process.env.GEMINI_API_KEY,
@@ -42,7 +57,7 @@ async function startServer() {
     process.env.GEMINI_API_KEY_ALT,
     process.env.GOOGLE_API_KEY,
     ...discoveredEnvKeys
-  ].filter((k): k is string => typeof k === 'string' && k.trim().length > 0)));
+  ].map(k => (k || '').trim()).filter(k => k.length > 0 && isLikelyApiKey(k))));
 
   console.log(`[Key Pool] Initialized with ${SYSTEM_KEYS.length} system keys.`);
 
@@ -297,6 +312,8 @@ async function startServer() {
             lastError = err;
             const errMsg = err.message || String(err);
             const isQuota = errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('RESOURCE_EXHAUSTED');
+            const isInvalidKey = errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('API_KEY_INVALID') || errMsg.includes('PERMISSION_DENIED');
+            const isBadRequest = errMsg.includes('400') || errMsg.includes('INVALID_ARGUMENT');
             const isServiceUnavailable = errMsg.includes('503') || errMsg.includes('overloaded') || errMsg.includes('currently unavailable') || errMsg.includes('UNAVAILABLE');
             const isNotFound = errMsg.includes('404') || errMsg.includes('not found') || errMsg.includes('501');
             const isTimeout = errMsg.includes('Timeout') || errMsg.includes('timeout') || errMsg.includes('aborted');
@@ -306,6 +323,15 @@ async function startServer() {
             if (isStrict) {
               console.info(`[Strict Mode Enforced] Model ${model} failed (${errMsg.slice(0, 80)}). Model fallback strictly disabled.`);
               break;
+            }
+
+            if (isBadRequest) {
+              throw err;
+            }
+
+            if (isInvalidKey) {
+              if (apiKey) markKeyExhausted(apiKey);
+              break; // Switch immediately to next key rather than trying all models with an invalid key
             }
 
             if (isNotFound) continue;
@@ -537,6 +563,12 @@ async function startServer() {
       }
       res.end();
     } catch (e: any) {
+      if (res.headersSent) {
+        try {
+          res.write(`data: ${JSON.stringify({ error: e.message || 'Streaming failed' })}\n\n`);
+        } catch {}
+        return res.end();
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -734,7 +766,11 @@ async function startServer() {
 
   // Predictive Visual Context & Google Image Search Grounding API
   app.post("/api/grounded-image-search", async (req, res) => {
-    const { prompt, mode = "web_grounding", searchType = "photo", imageModel = "gemini-3.1-flash-lite-image", discussionContext = "", apiKey: reqKey } = req.body;
+    const { prompt: rawPrompt, mode = "web_grounding", searchType = "photo", imageModel = "gemini-3.1-flash-lite-image", discussionContext = "", apiKey: reqKey } = req.body || {};
+    const prompt = typeof rawPrompt === 'string' ? rawPrompt.trim() : '';
+    if (!prompt) {
+      return res.status(400).json({ error: "نص البحث مطلوب" });
+    }
     const apiKey = (reqKey && typeof reqKey === 'string' && reqKey.trim() !== '') 
       ? reqKey.trim() 
       : (SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '');
@@ -912,22 +948,24 @@ async function startServer() {
 
   // POST /api/saved-images - Save image to archive
   app.post("/api/saved-images", (req, res) => {
-    const { title, imageUrl, sourceDomain, sourceUri, description, category = "حفظ" } = req.body;
-    if (!imageUrl) {
-      return res.status(400).json({ error: "رابط الصورة مطلوب" });
+    const { title, imageUrl, sourceDomain, sourceUri, description, category = "حفظ" } = req.body || {};
+    const isSafeUrl = typeof imageUrl === 'string' && (/^https?:\/\//i.test(imageUrl.trim()) || /^data:image\/(png|jpeg|jpg|webp|gif);base64,/i.test(imageUrl.trim()));
+    if (!isSafeUrl) {
+      return res.status(400).json({ error: "رابط الصورة مطلوب ويجب أن يكون رابطاً صالحاً" });
     }
+    const safeSourceUri = typeof sourceUri === 'string' && /^https?:\/\//i.test(sourceUri.trim()) ? sourceUri.trim() : imageUrl.trim();
     const newSaved = {
       id: `arch_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       title: title || "صورة محفوظة من الأرشيف",
-      imageUrl,
+      imageUrl: imageUrl.trim(),
       sourceDomain: sourceDomain || "أرشيف المحادثة",
-      sourceUri: sourceUri || imageUrl,
+      sourceUri: safeSourceUri,
       description: description || "تمت إضافتها إلى الأرشيف الشخصي",
       category,
       savedAt: new Date().toLocaleDateString("ar-SA")
     };
     // Avoid duplicates
-    if (!savedImagesArchive.some(img => img.imageUrl === imageUrl)) {
+    if (!savedImagesArchive.some(img => img.imageUrl === newSaved.imageUrl)) {
       savedImagesArchive.unshift(newSaved);
     }
     res.json({ success: true, savedImage: newSaved, savedImages: savedImagesArchive });
@@ -1145,7 +1183,7 @@ async function startServer() {
   const distPath = path.join(process.cwd(), "dist");
   const publicPath = path.join(process.cwd(), "public");
   const hasDist = fs.existsSync(distPath) && fs.existsSync(path.join(distPath, "index.html"));
-  const isProduction = process.env.NODE_ENV === "production" || process.env.npm_lifecycle_event === 'start' || hasDist;
+  const isProduction = process.env.NODE_ENV === "production" || process.env.npm_lifecycle_event === 'start';
 
   // Health and System Diagnostics Endpoint placed first for instant uptime & health probes
   app.get("/api/health", (req, res) => {
@@ -1165,7 +1203,7 @@ async function startServer() {
     });
   });
 
-  let useStatic = isProduction || hasDist;
+  let useStatic = isProduction;
   
   if (useStatic && !hasDist) {
     // If production is requested but dist doesn't exist yet, try to use public or fallback
@@ -1243,9 +1281,10 @@ async function startServer() {
     console.log(`[MindMirror Server] Operational & Listening on 0.0.0.0:${PORT} (PID: ${process.pid}, NODE_ENV: ${process.env.NODE_ENV || 'development'})`);
     
     // Start internal health heartbeat only after listener is active
-    setInterval(() => {
+    const healthTimer = setInterval(() => {
       fetch(`http://127.0.0.1:${PORT}/api/health`).catch(() => {});
     }, 45000);
+    healthTimer.unref();
   });
 
   server.keepAliveTimeout = 65000;
@@ -1271,9 +1310,10 @@ async function startServer() {
   });
 
   // Background keep-alive heartbeat to ensure event loop remains active
-  setInterval(() => {
+  const keepAliveTimer = setInterval(() => {
     // Keep event loop active continuously
   }, 15000);
+  keepAliveTimer.unref();
 
   // Attach WebSocket server for Gemini Live API
   const wss = new WebSocketServer({ server, path: "/live" });
@@ -1317,7 +1357,7 @@ async function startServer() {
     }, 25000);
     
     // Parse URL parameters for API key and voice/persona config
-    const url = new URL(req.url!, `http://${req.headers.host}`);
+    const url = new URL(req.url || '/live', `http://${req.headers.host || 'localhost'}`);
     const rawKey = url.searchParams.get("key");
     const clientApiKey = (rawKey && rawKey !== "undefined" && rawKey.trim() !== "") ? rawKey.trim() : undefined;
 
@@ -1348,6 +1388,16 @@ async function startServer() {
     let clientClosed = false;
     clientWs.once("close", () => {
       clientClosed = true;
+      clearInterval(pingInterval);
+      console.log("[Gemini Live] Client disconnected from /live");
+      if (session) {
+        try {
+          session.close();
+        } catch (e) {
+          // Already closed
+        }
+        session = null;
+      }
     });
 
     const connectWithFallback = async () => {
@@ -1527,19 +1577,8 @@ async function startServer() {
           console.error("[Gemini Live] Error processing client message", e);
         }
       });
-
-      clientWs.on("close", () => {
-        clearInterval(pingInterval);
-        console.log("[Gemini Live] Client disconnected from /live");
-        if (session) {
-          try {
-            session.close();
-          } catch (e) {
-            // Already closed
-          }
-        }
-      });
     }).catch(err => {
+      clearInterval(pingInterval);
       console.error("[Gemini Live] Fatal initialization error:", err);
       if (clientWs.readyState === 1) {
         clientWs.close();

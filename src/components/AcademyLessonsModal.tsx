@@ -11,6 +11,7 @@ import { useToast } from './Toast';
 import ConfirmModal from './ConfirmModal';
 import { SavedLesson, SavedCodeSnippet, SavedConcept } from '../types';
 import { copyToClipboard } from '../utils/clipboard';
+import { safeStorage } from '../utils/storage';
 
 interface AcademyLessonsModalProps {
   isOpen: boolean;
@@ -50,20 +51,12 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
   const [conceptToDelete, setConceptToDelete] = useState<{ id: string; concept: string } | null>(null);
   const [codeToDelete, setCodeToDelete] = useState<{ id: string; title: string } | null>(null);
 
-  // Load from localStorage
+  // Load from safeStorage
   const loadData = () => {
     try {
-      const savedLStr = localStorage.getItem('mindmirror_saved_lessons');
-      const savedL = savedLStr ? JSON.parse(savedLStr) : [];
-      setLessons(savedL);
- 
-      const savedConcStr = localStorage.getItem('mindmirror_saved_concepts');
-      const savedConc = savedConcStr ? JSON.parse(savedConcStr) : [];
-      setConcepts(savedConc);
- 
-      const savedCStr = localStorage.getItem('mindmirror_saved_code');
-      const savedC = savedCStr ? JSON.parse(savedCStr) : [];
-      setCodeSnippets(savedC);
+      setLessons(safeStorage.getJson<SavedLesson[]>('mindmirror_saved_lessons', []));
+      setConcepts(safeStorage.getJson<SavedConcept[]>('mindmirror_saved_concepts', []));
+      setCodeSnippets(safeStorage.getJson<SavedCodeSnippet[]>('mindmirror_saved_code', []));
     } catch (e) {
       console.error('[Storage] Error loading academy archive data:', e);
     }
@@ -74,7 +67,9 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
       loadData();
     }
     return () => {
-      window.speechSynthesis.cancel();
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
       setSpeakingConceptId(null);
     };
   }, [isOpen]);
@@ -120,7 +115,7 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
   const handleDeleteLesson = (id: string) => {
     const updated = lessons.filter(l => l.id !== id);
     setLessons(updated);
-    localStorage.setItem('mindmirror_saved_lessons', JSON.stringify(updated));
+    safeStorage.setItem('mindmirror_saved_lessons', JSON.stringify(updated));
     toast({
       title: 'تم حذف الدرس',
       message: 'تم إزالة الدرس من السجل المحلي.',
@@ -132,7 +127,7 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
   const handleSaveNote = (id: string) => {
     const updated = lessons.map(l => l.id === id ? { ...l, notes: noteInputValue } : l);
     setLessons(updated);
-    localStorage.setItem('mindmirror_saved_lessons', JSON.stringify(updated));
+    safeStorage.setItem('mindmirror_saved_lessons', JSON.stringify(updated));
     setEditingNoteId(null);
     toast({
       title: 'تم تحديث الملاحظة',
@@ -186,7 +181,7 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
   const handleDeleteConcept = (id: string) => {
     const updated = concepts.filter(c => c.id !== id);
     setConcepts(updated);
-    localStorage.setItem('mindmirror_saved_concepts', JSON.stringify(updated));
+    safeStorage.setItem('mindmirror_saved_concepts', JSON.stringify(updated));
     if (activeCardIndex >= updated.length && updated.length > 0) {
       setActiveCardIndex(updated.length - 1);
     }
@@ -232,6 +227,14 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
 
   // Concept Audio Speech
   const handleSpeakConcept = (c: SavedConcept) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      toast({
+        title: 'عذراً',
+        message: 'متصفحك لا يدعم القراءة الصوتية للنصوص.',
+        type: 'error'
+      });
+      return;
+    }
     if (speakingConceptId === c.id) {
       window.speechSynthesis.cancel();
       setSpeakingConceptId(null);
@@ -264,7 +267,7 @@ export const AcademyLessonsModal: React.FC<AcademyLessonsModalProps> = ({
   const handleDeleteCode = (id: string) => {
     const updated = codeSnippets.filter(c => c.id !== id);
     setCodeSnippets(updated);
-    localStorage.setItem('mindmirror_saved_code', JSON.stringify(updated));
+    safeStorage.setItem('mindmirror_saved_code', JSON.stringify(updated));
     toast({
       title: 'تم حذف الكود',
       message: 'تم إزالة الكود من مكتبة الأكواد.',

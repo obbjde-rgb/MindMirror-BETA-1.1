@@ -8,6 +8,7 @@ import { VoiceSampleRecorder } from './VoiceSampleRecorder';
 import ConfirmModal from './ConfirmModal';
 import { useToast } from './Toast';
 import { base64ToWavBlob, clearAudioCacheFromStorage } from '../utils/audio';
+import { safeStorage } from '../utils/storage';
 
 const AVAILABLE_FONTS = [
   {
@@ -81,6 +82,7 @@ interface SettingsModalProps {
   dynamicVoices: string[];
   dynamicAudioModels: string[];
   onVoiceAdded?: (voiceName: string) => void;
+  onVoiceRemoved?: (voiceName: string) => void;
   updateModelsAndVoices: (customKey?: string) => void;
   isUpdatingModels: boolean;
   isApiKeyInvalid: boolean;
@@ -122,7 +124,7 @@ export default function SettingsModal({
   isOpen, onClose, apiKey, setApiKey, provider, setProvider, model, setModel,
   audioModel, setAudioModel,
   ttsVolume, setTtsVolume, ttsSpeed, setTtsSpeed, personas, updatePersonaTone, updatePersonaVoice,
-  fixLegacyPersonas, openPersonaExtractor, isFixingLegacy, userInfo, setUserInfo, dynamicModels, dynamicVoices, dynamicAudioModels, onVoiceAdded, updateModelsAndVoices, isUpdatingModels,
+  fixLegacyPersonas, openPersonaExtractor, isFixingLegacy, userInfo, setUserInfo, dynamicModels, dynamicVoices, dynamicAudioModels, onVoiceAdded, onVoiceRemoved, updateModelsAndVoices, isUpdatingModels,
   isApiKeyInvalid, isApiKeyVerified, isQuotaExhausted,
   
   // Auto-Archive Props
@@ -176,32 +178,25 @@ export default function SettingsModal({
   const [isLoadingPreview, setIsLoadingPreview] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  const [voiceToDelete, setVoiceToDelete] = useState<string | null>(null);
+  const previewObjectUrlRef = useRef<string | null>(null);
+  const clonedTestObjectUrlRef = useRef<string | null>(null);
+
   useEffect(() => {
     return () => {
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
       }
+      if (previewObjectUrlRef.current) {
+        URL.revokeObjectURL(previewObjectUrlRef.current);
+        previewObjectUrlRef.current = null;
+      }
+      if (clonedTestObjectUrlRef.current) {
+        URL.revokeObjectURL(clonedTestObjectUrlRef.current);
+        clonedTestObjectUrlRef.current = null;
+      }
     };
   }, []);
-
-  const createWavHeader = (dataByteLength: number, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): ArrayBuffer => {
-    const header = new ArrayBuffer(44);
-    const view = new DataView(header);
-    view.setUint32(0, 0x52494646, false); // "RIFF"
-    view.setUint32(4, 36 + dataByteLength, true);
-    view.setUint32(8, 0x57415645, false); // "WAVE"
-    view.setUint32(12, 0x666d7420, false); // "fmt "
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
-    view.setUint16(32, numChannels * (bitsPerSample / 8), true);
-    view.setUint16(34, bitsPerSample, true);
-    view.setUint32(36, 0x64617461, false); // "data"
-    view.setUint32(40, dataByteLength, true);
-    return header;
-  };
 
   const handlePlayVoicePreview = async (v: string, isCustom: boolean) => {
     if (previewingVoice === v) {
@@ -214,6 +209,10 @@ export default function SettingsModal({
 
     if (previewAudioRef.current) {
       previewAudioRef.current.pause();
+    }
+    if (previewObjectUrlRef.current) {
+      URL.revokeObjectURL(previewObjectUrlRef.current);
+      previewObjectUrlRef.current = null;
     }
 
     setIsLoadingPreview(v);
@@ -244,7 +243,7 @@ export default function SettingsModal({
         body: JSON.stringify({
           apiKey: apiKey || '',
           params: {
-            model: 'gemini-3.8-flash-tts',
+            model: audioModel || 'gemini-3.8-flash-tts',
             contents: sampleText,
             config: {
               responseModalities: ["AUDIO"],
@@ -265,12 +264,17 @@ export default function SettingsModal({
           const wavBlob = base64ToWavBlob([base64Audio]);
           if (wavBlob) {
             const audioUrl = URL.createObjectURL(wavBlob);
+            previewObjectUrlRef.current = audioUrl;
             const audio = new Audio(audioUrl);
             previewAudioRef.current = audio;
             setPreviewingVoice(v);
             audio.play().catch(console.error);
             audio.onended = () => {
               setPreviewingVoice(null);
+              if (previewObjectUrlRef.current === audioUrl) {
+                URL.revokeObjectURL(audioUrl);
+                previewObjectUrlRef.current = null;
+              }
             };
           }
         }
@@ -1174,11 +1178,10 @@ export default function SettingsModal({
                             } else {
                               const rawText = await res.text();
                               console.warn('[Voice Replication] Server returned non-JSON contentType:', contentType, rawText);
-                              data = {
-                                success: true,
-                                voice_id: `voice_custom_${Date.now()}`,
-                                name: `voices/voice_custom_${Date.now()}`
-                              };
+                              throw new Error(`استجابة غير متوقعة من الخادم (${res.status})`);
+                            }
+                            if (!res.ok || data.error) {
+                              throw new Error(data.error || `فشل استنساخ الصوت (${res.status})`);
                             }
 
                             // Step 4: Finished and Activated
@@ -1193,8 +1196,12 @@ export default function SettingsModal({
                               onVoiceAdded(voiceName);
                             }
 
-                            // Create test preview audio URL from source sample
+                            // Create test preview audio URL from source sample (revoking previous)
+                            if (clonedTestObjectUrlRef.current) {
+                              URL.revokeObjectURL(clonedTestObjectUrlRef.current);
+                            }
                             const previewAudioUrl = URL.createObjectURL(sourceAudioFile);
+                            clonedTestObjectUrlRef.current = previewAudioUrl;
 
                             setClonedSuccessData({
                               voiceId: data.voice_id || data.name || `voice_${Date.now()}`,
@@ -1311,17 +1318,7 @@ export default function SettingsModal({
                             {isCustom && (
                               <button
                                 type="button"
-                                onClick={() => {
-                                  if (confirm(`هل أنت تأكد من حذف الصوت المستنسخ "${v}"؟`)) {
-                                    const updated = dynamicVoices.filter(item => item !== v);
-                                    if (onVoiceAdded) {
-                                      // Call with updated voices array indirectly or remove from storage
-                                    }
-                                    const safeStorage = (window as any).safeStorage || localStorage;
-                                    safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
-                                    window.location.reload();
-                                  }
-                                }}
+                                onClick={() => setVoiceToDelete(v)}
                                 className="p-1 rounded-lg hover:bg-red-500/10 text-muted hover:text-red-400 border border-transparent hover:border-red-500/30 cursor-pointer transition-colors"
                                 title="حذف الصوت المستنسخ"
                               >
@@ -1519,6 +1516,28 @@ export default function SettingsModal({
               }
             }}
             onCancel={() => setShowFactoryResetConfirm(false)}
+          />
+
+          <ConfirmModal
+            isOpen={!!voiceToDelete}
+            title="حذف الصوت المستنسخ"
+            message={`هل أنت متأكد من رغبتك في حذف الصوت المستنسخ "${voiceToDelete}" نهائياً؟`}
+            confirmText="نعم، احذف الصوت"
+            cancelText="إلغاء الأمر"
+            onConfirm={() => {
+              if (voiceToDelete) {
+                const updated = dynamicVoices.filter(item => item !== voiceToDelete);
+                safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
+                onVoiceRemoved?.(voiceToDelete);
+                toast({
+                  type: 'success',
+                  title: 'تم حذف الصوت',
+                  message: `تمت إزالة "${voiceToDelete}" من مكتبة الأصوات.`
+                });
+                setVoiceToDelete(null);
+              }
+            }}
+            onCancel={() => setVoiceToDelete(null)}
           />
         </motion.div>
       )}

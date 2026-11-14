@@ -136,13 +136,13 @@ class AutoSelfRepairEngine {
       }
 
       // 4. Validate & auto-repair chat history JSON
-      const rawHistory = safeStorage.getItem('mindmirror_chat_history');
+      const rawHistory = safeStorage.getItem('mindmirror_history');
       if (rawHistory) {
         try {
           parseJsonSafely(rawHistory);
         } catch (e) {
           logger.warn('⚠️ [Self-Repair] اكتشاف تلف في سجل المحادثات. جاري الاستعادة الذاتية...', e);
-          safeStorage.removeItem('mindmirror_chat_history');
+          safeStorage.removeItem('mindmirror_history');
           repairedItems.push('استعادة سجل المحادثات (Chat History Store)');
         }
       }

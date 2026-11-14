@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { logger } from './logger';
+import { safeStorage } from './storage';
 
 export const DEFAULT_MODEL = 'gemini-3-flash-preview';
 export const DEFAULT_AUDIO_MODEL = 'gemini-3.8-flash-tts';
@@ -26,8 +27,12 @@ export const normalizeGeminiModel = (modelName?: string | null): string => {
   return clean;
 };
 
-export const parseJsonSafely = <T = any>(rawText: string): T => {
-  if (!rawText) throw new Error("Empty text provided for JSON parsing");
+export const parseJsonSafely = <T = any>(rawText: string, fallback?: T): T => {
+  const hasFallback = fallback !== undefined;
+  if (!rawText) {
+    if (hasFallback) return fallback as T;
+    throw new Error("Empty text provided for JSON parsing");
+  }
   
   let cleaned = rawText.trim();
   
@@ -83,6 +88,7 @@ export const parseJsonSafely = <T = any>(rawText: string): T => {
       return JSON.parse(sanitizedFull);
     } catch (finalErr: any) {
       logger.error("Failed to parse JSON even with advanced fallbacks. Raw text length: " + rawText.length, finalErr);
+      if (hasFallback) return fallback as T;
       throw finalErr;
     }
   }
@@ -94,8 +100,6 @@ export const sanitizeApiKey = (key: string): string => {
   // This removes spaces, invisible characters, and Unicode that cause Header append errors
   return key.trim().replace(/[^\x21-\x7E]/g, '');
 };
-
-import { safeStorage } from './storage';
 
 let cachedApiKey = '';
 
@@ -120,19 +124,7 @@ export const getApiKey = (): string => {
     cachedApiKey = sanitized;
     return sanitized;
   }
-  
-  // Fallback to build-time process.env variable
-  try {
-    const envKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (envKey) {
-      const sanitizedEnv = sanitizeApiKey(envKey);
-      cachedApiKey = sanitizedEnv;
-      return sanitizedEnv;
-    }
-  } catch (e) {
-    // Ignore if process.env is not defined
-  }
-  
+
   return '';
 };
 
@@ -153,12 +145,19 @@ export const checkSystemHealth = async (): Promise<{ status: string; activeKeysC
   return { status: 'degraded', activeKeysCount: 1, defaultModel: 'gemini-3-flash-preview' };
 };
 
-export const getGeminiClient = (apiKeyOverride?: string): any => {
+export interface GeminiGenerateResult {
+  text: string;
+  candidates?: any[];
+  functionCalls?: any[];
+  [key: string]: any;
+}
+
+export const getGeminiClient = (apiKeyOverride?: string) => {
   const customKey = sanitizeApiKey(apiKeyOverride || getApiKey());
 
   return {
     models: {
-      generateContent: async (params: any) => {
+      generateContent: async (params: any): Promise<GeminiGenerateResult> => {
         // First try with customKey if provided, or fallback automatically if empty/invalid
         let response = await fetch('/api/generate', {
           method: 'POST',
@@ -196,7 +195,7 @@ export const getGeminiClient = (apiKeyOverride?: string): any => {
           text: typeof data.text === 'function' ? data.text() : (data.text || '')
         };
       },
-      generateContentStream: async function* (params: any) {
+      generateContentStream: async (params: any): Promise<AsyncGenerator<GeminiGenerateResult, void, unknown>> => {
         let response = await fetch('/api/generate-stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -226,10 +225,12 @@ export const getGeminiClient = (apiKeyOverride?: string): any => {
           } catch (e) {}
           throw new Error(parsedMsg);
         }
-        
+
         const reader = response.body!.getReader();
         const decoder = new TextDecoder();
-        let buffer = '';
+
+        return (async function* (): AsyncGenerator<GeminiGenerateResult, void, unknown> {
+          let buffer = '';
         
         while (true) {
           const { done, value } = await reader.read();
@@ -262,7 +263,7 @@ export const getGeminiClient = (apiKeyOverride?: string): any => {
                     text: textVal
                   };
                 } catch (e: any) {
-                  if (e.message && !e.message.includes('Unexpected token')) {
+                  if (!(e instanceof SyntaxError)) {
                     throw e;
                   }
                 }
@@ -293,12 +294,13 @@ export const getGeminiClient = (apiKeyOverride?: string): any => {
                 text: textVal
               };
             } catch (e: any) {
-              if (e.message && !e.message.includes('Unexpected token')) {
+              if (!(e instanceof SyntaxError)) {
                 throw e;
               }
             }
           }
         }
+        })();
       }
     },
     chats: {
@@ -318,19 +320,27 @@ export const getGeminiClient = (apiKeyOverride?: string): any => {
               config,
               strictModel: isStrict
             });
-            const textVal = typeof result.text === 'function' ? result.text() : (result.text || '');
+            const textVal = result.text || '';
             history.push({ role: 'model', parts: [{ text: textVal }] });
             return result;
           },
           sendMessageStream: async function* (msgParams: any) {
             const userContent = typeof msgParams === 'string' ? msgParams : (msgParams?.message || msgParams?.text || JSON.stringify(msgParams));
             history.push({ role: 'user', parts: [{ text: userContent }] });
-            yield* getGeminiClient(customKey).models.generateContentStream({
+            let accumulatedText = '';
+            const stream = await getGeminiClient(customKey).models.generateContentStream({
               model,
               contents: history,
               config,
               strictModel: isStrict
             });
+            for await (const chunk of stream) {
+              if (chunk?.text) accumulatedText += chunk.text;
+              yield chunk;
+            }
+            if (accumulatedText) {
+              history.push({ role: 'model', parts: [{ text: accumulatedText }] });
+            }
           }
         };
       }
@@ -343,7 +353,8 @@ export const clientGenerateContent = async (params: any) => {
 };
 
 export const clientGenerateContentStream = async function* (params: any) {
-  yield* getGeminiClient().models.generateContentStream(params);
+  const stream = await getGeminiClient().models.generateContentStream(params);
+  yield* stream;
 };
 
 export const checkIsQuotaExceeded = (error: any): boolean => {
@@ -412,17 +423,19 @@ export const withRetry = async <T,>(fn: () => Promise<T>, retries = 10, delay = 
   try {
     return await fn();
   } catch (error: any) {
-    logger.warn('API Error Caught, checking for rate limit/quota:', error?.message || error);
+    logger.warn('API Error Caught, checking for transient/quota conditions:', error?.message || error);
     const isRateLimited = checkIsRateLimited(error);
     const isQuotaExceeded = checkIsQuotaExceeded(error);
-    
-    // Retry for rate limits and quota conditions seamlessly
-    if (retries > 0) {
+    const msg = String(error?.message || error || '').toLowerCase();
+    const isBadRequest = msg.includes('400') || msg.includes('invalid_argument') || msg.includes('api_key_invalid');
+    const isTransient = isRateLimited || isQuotaExceeded || msg.includes('503') || msg.includes('502') || msg.includes('504') || msg.includes('overloaded') || msg.includes('unavailable') || msg.includes('timeout') || msg.includes('network') || msg.includes('failed to fetch');
+
+    if (retries > 0 && !isBadRequest && isTransient) {
       const waitTime = isQuotaExceeded 
         ? delay + (Math.random() * 1500)
         : delay + (Math.random() * 1000);
         
-      logger.info(`Rate limit or Quota condition detected. Auto-retrying silently in ${Math.round(waitTime)}ms... (${retries} retries left)`);
+      logger.info(`Transient/Quota condition detected. Auto-retrying silently in ${Math.round(waitTime)}ms... (${retries} retries left)`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
       return withRetry(fn, retries - 1, delay * 1.2);
     }

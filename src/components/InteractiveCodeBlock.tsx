@@ -1,9 +1,11 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   ChevronDown, ChevronUp, Copy, Check, Play, Download, Bookmark, 
   Terminal, Eye, Code2, FileCode, CheckCheck, Sparkles, RefreshCw, Layers
 } from 'lucide-react';
 import { useToast } from './Toast';
+import { copyToClipboard } from '../utils/clipboard';
+import { safeStorage } from '../utils/storage';
 
 interface InteractiveCodeBlockProps {
   language?: string;
@@ -64,16 +66,26 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
   const lineCount = code.trim().split('\n').length;
   const isHtmlVisual = lang === 'html' || lang === 'svg' || (code.includes('<html') && code.includes('</html>'));
 
+  const cleanupExecRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      cleanupExecRef.current?.();
+    };
+  }, []);
+
   // Copy code to clipboard
-  const handleCopy = () => {
-    navigator.clipboard.writeText(code);
-    setCopied(true);
-    toast({
-      title: 'تم نسخ الكود',
-      message: `تم نسخ كود ${filePath} إلى الحافظة بنجاح.`,
-      type: 'success'
-    });
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(code);
+    if (ok) {
+      setCopied(true);
+      toast({
+        title: 'تم نسخ الكود',
+        message: `تم نسخ كود ${filePath} إلى الحافظة بنجاح.`,
+        type: 'success'
+      });
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   // Download code as file with exact path
@@ -97,10 +109,10 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
     });
   };
 
-  // Save to Academy Code Vault (localStorage)
+  // Save to Academy Code Vault (safeStorage)
   const handleSaveToVault = () => {
     try {
-      const existing = JSON.parse(localStorage.getItem('mindmirror_saved_code') || '[]');
+      const existing = JSON.parse(safeStorage.getItem('mindmirror_saved_code') || '[]');
       const newSnippet = {
         id: 'code_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         filePath,
@@ -110,7 +122,7 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
         createdAt: new Date().toISOString()
       };
       existing.unshift(newSnippet);
-      localStorage.setItem('mindmirror_saved_code', JSON.stringify(existing));
+      safeStorage.setItem('mindmirror_saved_code', JSON.stringify(existing));
       setIsSaved(true);
       toast({
         title: 'تم الحفظ في مكتبة الأكواد',
@@ -128,6 +140,7 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
 
   // Run Code / Execute
   const handleRunCode = () => {
+    cleanupExecRef.current?.();
     setIsExpanded(true);
     setIsRunning(true);
     setExecutionStatus('idle');
@@ -140,46 +153,107 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
     }
 
     setActiveTab('terminal');
-    setTerminalLogs([`🚀 [Exec Engine] جاري بدء تشغيل ${filePath}...`, `⏱️ بيئة التنفيذ: ${lang.toUpperCase()} Sandbox v2.5`]);
+    const baseLogs: string[] = [`🚀 [Exec Engine] جاري بدء تشغيل ${filePath}...`, `⏱️ بيئة التنفيذ: ${lang.toUpperCase()} Isolated Sandbox v3.0`];
+    setTerminalLogs(baseLogs);
 
-    setTimeout(() => {
-      const logs: string[] = [`🚀 [Exec Engine] جاري بدء تشغيل ${filePath}...`, `⏱️ بيئة التنفيذ: ${lang.toUpperCase()} Sandbox v2.5`];
+    if (lang === 'javascript' || lang === 'js') {
+      const runId = `mm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const capturedLogs: string[] = [];
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('sandbox', 'allow-scripts');
+      iframe.style.display = 'none';
 
-      if (lang === 'javascript' || lang === 'js') {
-        try {
-          const capturedLogs: string[] = [];
-          const customConsole = {
-            log: (...args: any[]) => capturedLogs.push(`[LOG]: ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ')}`),
-            error: (...args: any[]) => capturedLogs.push(`[ERROR]: ${args.join(' ')}`),
-            warn: (...args: any[]) => capturedLogs.push(`[WARN]: ${args.join(' ')}`),
-            info: (...args: any[]) => capturedLogs.push(`[INFO]: ${args.join(' ')}`)
-          };
-          
-          // Execute code in safe Function wrapper
-          const runFn = new Function('console', code);
-          runFn(customConsole);
+      let settled = false;
+      const cleanup = () => {
+        window.removeEventListener('message', onMessage);
+        clearTimeout(timeoutId);
+        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        cleanupExecRef.current = null;
+      };
 
+      const onMessage = (event: MessageEvent) => {
+        if (event.source !== iframe.contentWindow) return;
+        const data = event.data;
+        if (!data || data.__mmSandboxId !== runId) return;
+
+        if (data.type === 'log') {
+          capturedLogs.push(String(data.payload));
+        } else if (data.type === 'done') {
+          if (settled) return;
+          settled = true;
+          const finalLogs = [...baseLogs];
           if (capturedLogs.length === 0) {
-            logs.push('✅ تم تنفيذ البرنامج بنجاح دون أخطاء.');
-            logs.push('ℹ️ (لم يتم طباعة أي مخرجات عبر console.log)');
+            finalLogs.push('✅ تم تنفيذ البرنامج بنجاح داخل البيئة المعزولة دون أخطاء.');
+            finalLogs.push('ℹ️ (لم يتم طباعة أي مخرجات عبر console.log)');
           } else {
-            logs.push(...capturedLogs);
-            logs.push('✨ تم الانتهاء بنجاح [Process exited with code 0]');
+            finalLogs.push(...capturedLogs);
+            finalLogs.push('✨ تم الانتهاء بنجاح [Process exited with code 0]');
           }
+          setTerminalLogs(finalLogs);
           setExecutionStatus('success');
-        } catch (err: any) {
-          logs.push(`❌ [Runtime Error]: ${err.message || err}`);
+          setIsRunning(false);
+          cleanup();
+        } else if (data.type === 'error') {
+          if (settled) return;
+          settled = true;
+          setTerminalLogs([...baseLogs, ...capturedLogs, `❌ [Runtime Error]: ${data.payload}`]);
           setExecutionStatus('error');
+          setIsRunning(false);
+          cleanup();
         }
-      } else if (lang === 'python' || lang === 'py') {
-        // Evaluate print statements and basic python constructs
+      };
+
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        setTerminalLogs([...baseLogs, ...capturedLogs, '⏱️ [Timeout]: تم إيقاف التنفيذ المعزول لتجاوز مهلة 3 ثوانٍ.']);
+        setExecutionStatus('error');
+        setIsRunning(false);
+        cleanup();
+      }, 3000);
+
+      cleanupExecRef.current = cleanup;
+      window.addEventListener('message', onMessage);
+
+      const safeCodeJson = JSON.stringify(code).replace(/</g, '\\u003c');
+      const safeRunId = JSON.stringify(runId);
+      iframe.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+        (function() {
+          var runId = ${safeRunId};
+          var send = function(type, payload) {
+            try { parent.postMessage({ __mmSandboxId: runId, type: type, payload: payload }, '*'); } catch(e) {}
+          };
+          var fmt = function(a) {
+            try { return typeof a === 'object' ? JSON.stringify(a) : String(a); }
+            catch(e) { return String(a); }
+          };
+          console.log = function() { send('log', '[LOG]: ' + [].map.call(arguments, fmt).join(' ')); };
+          console.error = function() { send('log', '[ERROR]: ' + [].map.call(arguments, fmt).join(' ')); };
+          console.warn = function() { send('log', '[WARN]: ' + [].map.call(arguments, fmt).join(' ')); };
+          console.info = function() { send('log', '[INFO]: ' + [].map.call(arguments, fmt).join(' ')); };
+          try {
+            var fn = new Function(${safeCodeJson});
+            fn();
+            send('done', null);
+          } catch (err) {
+            send('error', err && err.message ? err.message : String(err));
+          }
+        })();
+      <\/script></body></html>`;
+      document.body.appendChild(iframe);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const logs: string[] = [...baseLogs];
+
+      if (lang === 'python' || lang === 'py') {
         const lines = code.split('\n');
         let hasOutput = false;
         lines.forEach((line) => {
           const trimmed = line.trim();
           if (trimmed.startsWith('print(') && trimmed.endsWith(')')) {
             const inner = trimmed.slice(6, -1).trim();
-            // strip quotes if simple string
             const cleaned = inner.replace(/^['"]|['"]$/g, '');
             logs.push(`[STDOUT]: ${cleaned}`);
             hasOutput = true;
@@ -206,6 +280,8 @@ export const InteractiveCodeBlock: React.FC<InteractiveCodeBlockProps> = ({
       setTerminalLogs(logs);
       setIsRunning(false);
     }, 450);
+
+    cleanupExecRef.current = () => clearTimeout(timer);
   };
 
   return (

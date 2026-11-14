@@ -43,7 +43,6 @@ export const FocusModeOverlay: React.FC<FocusModeOverlayProps> = ({
   const [customMinutesInput, setCustomMinutesInput] = useState<string>('25');
   const [showTimerConfig, setShowTimerConfig] = useState<boolean>(false);
   const [showCompletionModal, setShowCompletionModal] = useState<boolean>(false);
-  const [isMinimized, setIsMinimized] = useState<boolean>(false);
 
   // Ambient Audio Generator (Web Audio API)
   const [ambientSound, setAmbientSound] = useState<'none' | 'binaural' | 'whitenoise' | 'rain'>('none');
@@ -133,6 +132,11 @@ export const FocusModeOverlay: React.FC<FocusModeOverlayProps> = ({
         osc.start(ctx.currentTime + idx * 0.15);
         osc.stop(ctx.currentTime + idx * 0.15 + 2.6);
       });
+      setTimeout(() => {
+        if (ctx.state !== 'closed') {
+          ctx.close().catch(() => {});
+        }
+      }, 3300);
     } catch (e) {
       // AudioContext may be restricted by autoplay policy until user gesture
     }
@@ -218,8 +222,6 @@ export const FocusModeOverlay: React.FC<FocusModeOverlayProps> = ({
     const secs = totalSeconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
-
-  const progressPercent = Math.max(0, Math.min(100, ((initialDurationMinutes * 60 - secondsLeft) / (initialDurationMinutes * 60)) * 100));
 
   return (
     <>

@@ -52,36 +52,39 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
       playbackAbortController.current.abort();
       playbackAbortController.current = null;
     }
-    
+
+    const ctx = audioPlaybackRef.current.audioCtx;
+    const gain = audioPlaybackRef.current.gainNode;
+    const src = audioPlaybackRef.current.sourceNode;
+
+    audioPlaybackRef.current.audioCtx = null;
+    audioPlaybackRef.current.gainNode = null;
+    audioPlaybackRef.current.sourceNode = null;
+
     try {
-      if (audioPlaybackRef.current.gainNode && audioPlaybackRef.current.audioCtx) {
-        const ctx = audioPlaybackRef.current.audioCtx;
+      if (gain && ctx && ctx.state !== 'closed') {
         const now = ctx.currentTime;
-        audioPlaybackRef.current.gainNode.gain.cancelScheduledValues(now);
-        audioPlaybackRef.current.gainNode.gain.setValueAtTime(audioPlaybackRef.current.gainNode.gain.value, now);
-        audioPlaybackRef.current.gainNode.gain.linearRampToValueAtTime(0, now + 0.015);
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(gain.gain.value, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.015);
       }
-      if (audioPlaybackRef.current.sourceNode) {
+      if (src) {
         setTimeout(() => {
           try {
-            audioPlaybackRef.current.sourceNode?.stop();
-            audioPlaybackRef.current.sourceNode?.disconnect();
+            src.stop();
+            src.disconnect();
           } catch (e) {}
         }, 16);
       }
-      if (audioPlaybackRef.current.gainNode) {
+      if (gain) {
         setTimeout(() => {
           try {
-            audioPlaybackRef.current.gainNode?.disconnect();
+            gain.disconnect();
           } catch (e) {}
         }, 20);
       }
     } catch (e) {
       // Ignore errors on cleanup
-    } finally {
-      audioPlaybackRef.current.audioCtx = null;
-      audioPlaybackRef.current.gainNode = null;
-      audioPlaybackRef.current.sourceNode = null;
     }
     
     setDebatePlaybackState('idle');
@@ -156,6 +159,10 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
           .replace(/[*#_`]/g, '')        // Remove markdown formatting
           .replace(/^(تعليمات|ملاحظة|تنبيه|prompt|system):.*/gmi, '')
           .trim();
+
+        if (!cleanText) {
+          return null;
+        }
 
         let response: any;
         const candidateAudioModels = Array.from(new Set([
@@ -318,16 +325,24 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
       signal
     );
 
+    let idleWaitCount = 0;
     while (!signal.aborted) {
       const currentMsgs = getMessages();
       if (currentIndex >= currentMsgs.length) {
-        if (onReachEnd && !reachEndTriggered) {
+        if (!onReachEnd) {
+          break;
+        }
+        if (!reachEndTriggered) {
           reachEndTriggered = true;
           onReachEnd();
+        }
+        if (++idleWaitCount > 20) {
+          break;
         }
         await new Promise(resolve => setTimeout(resolve, 1000));
         continue;
       }
+      idleWaitCount = 0;
       reachEndTriggered = false;
 
       const msg = currentMsgs[currentIndex];
@@ -476,7 +491,7 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
       if (base64Audios.length > 0) {
         const blob = base64ToPCM16(base64Audios);
         if (blob) {
-          downloadBlob(blob, 'debate_full.pcm');
+          downloadBlob(blob, 'debate_full.wav');
         }
       } else {
         toast({ title: 'تنبيه', message: 'لم يتم العثور على صوتيات لتنزيلها.', type: 'info' });

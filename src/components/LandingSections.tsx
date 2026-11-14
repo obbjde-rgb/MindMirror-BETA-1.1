@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { ArrowDown, Sparkles } from 'lucide-react';
 import { generateRandomAITheme, applyAITheme } from '../utils/aiThemeGenerator';
@@ -20,12 +20,20 @@ export const SectionTitle = ({ title, tag }: { title: string, tag: string }) => 
 
 export const LandingSections: React.FC = () => {
   const [activeThemeToast, setActiveThemeToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const handleMindMirrorClick = () => {
     const newPalette = generateRandomAITheme();
     applyAITheme(newPalette);
     setActiveThemeToast(newPalette.name);
-    setTimeout(() => setActiveThemeToast(null), 3500);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setActiveThemeToast(null), 3500);
   };
 
   return (
@@ -128,15 +136,16 @@ export const LandingSections: React.FC = () => {
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 mb-12">
         {[
-            { color: "accent", icon: "🔎", title: "طبقة الاستيعاب", subtitle: "Data Ingestion", items: ["خادم بحث يجمع بيانات الشخص", "Web Scraper لكتب، مقالات", "Crawler للشبكات الاجتماعية", "Document Parser لملفات PDF", "YouTube Transcriber للفيديوهات"] },
-            { color: "accent2", icon: "🧬", title: "طبقة تحليل الشخصية", subtitle: "Persona Analysis", items: ["استخراج البصمة اللغوية", "تحديد منظومة القيم والمبادئ", "رسم خارطة طريقة التفكير", "تتبع تطور الأفكار (Timeline)", "تحليل المواقف والآراء"] },
-            { color: "accent3", icon: "🗄️", title: "طبقة المعرفة", subtitle: "Knowledge & Memory", items: ["Vector Database مخصص", "Hierarchical Memory", "Semantic Chunking ذكي", "Episodic Memory للمسار", "Contradiction Detection"] },
-            { color: "accent4", icon: "🤖", title: "طبقة النموذج اللغوي", subtitle: "LLM Orchestration", items: ["Dynamic System Prompt", "RAG Pipeline: استرجاع + توليد", "Multi-Model Strategy", "Style Consistency Checker", "Confidence Score للرد"] },
-            { color: "[#ef4444]", icon: "⚖️", title: "طبقة الأخلاقيات", subtitle: "Ethics & Safety", items: ["تمييز الشخصيات العامة", "Disclaimer تلقائي", "Content Filter للردود", "Opt-out System", "Bias Detection"] },
-            { color: "[#ec4899]", icon: "🎨", title: "طبقة الواجهة", subtitle: "UX Layer", items: ["Persona Card مع ملخص", "Chat Interface للأصالة", "Source Viewer للمصدر", "Voice Mode (TTS)", "Debate Mode تفاعلي"] },
+            { barColor: "var(--color-accent)", icon: "🔎", title: "طبقة الاستيعاب", subtitle: "Data Ingestion", items: ["خادم بحث يجمع بيانات الشخص", "Web Scraper لكتب، مقالات", "Crawler للشبكات الاجتماعية", "Document Parser لملفات PDF", "YouTube Transcriber للفيديوهات"] },
+            { barColor: "var(--color-accent2)", icon: "🧬", title: "طبقة تحليل الشخصية", subtitle: "Persona Analysis", items: ["استخراج البصمة اللغوية", "تحديد منظومة القيم والمبادئ", "رسم خارطة طريقة التفكير", "تتبع تطور الأفكار (Timeline)", "تحليل المواقف والآراء"] },
+            { barColor: "var(--color-accent3)", icon: "🗄️", title: "طبقة المعرفة", subtitle: "Knowledge & Memory", items: ["Vector Database مخصص", "Hierarchical Memory", "Semantic Chunking ذكي", "Episodic Memory للمسار", "Contradiction Detection"] },
+            { barColor: "var(--color-accent4)", icon: "🤖", title: "طبقة النموذج اللغوي", subtitle: "LLM Orchestration", items: ["Dynamic System Prompt", "RAG Pipeline: استرجاع + توليد", "Multi-Model Strategy", "Style Consistency Checker", "Confidence Score للرد"] },
+            { barColor: "#ef4444", icon: "⚖️", title: "طبقة الأخلاقيات", subtitle: "Ethics & Safety", items: ["تمييز الشخصيات العامة", "Disclaimer تلقائي", "Content Filter للردود", "Opt-out System", "Bias Detection"] },
+            { barColor: "#ec4899", icon: "🎨", title: "طبقة الواجهة", subtitle: "UX Layer", items: ["Persona Card مع ملخص", "Chat Interface للأصالة", "Source Viewer للمصدر", "Voice Mode (TTS)", "Debate Mode تفاعلي"] },
         ].map((layer, i) => (
             <motion.div key={i} initial="hidden" whileInView="visible" viewport={{ once: true }} variants={fadeInVariants} 
-                className={`bg-surface border border-border rounded-xl p-5 relative overflow-hidden transition-all duration-300 hover:border-border-accent hover:shadow-lg before:content-[''] before:absolute before:top-0 before:left-0 before:right-0 before:h-1 before:rounded-t-xl before:bg-${layer.color}`}>
+                className="bg-surface border border-border rounded-xl p-5 relative overflow-hidden transition-all duration-300 hover:border-border-accent hover:shadow-lg">
+                <div className="absolute top-0 left-0 right-0 h-1 rounded-t-xl" style={{ backgroundColor: layer.barColor }} />
                 <div className="flex items-center gap-3 mb-4">
                     <div className="w-10 h-10 rounded-lg flex items-center justify-center text-lg bg-surface2">{layer.icon}</div>
                     <div>

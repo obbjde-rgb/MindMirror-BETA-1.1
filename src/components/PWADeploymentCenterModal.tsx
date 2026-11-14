@@ -5,6 +5,7 @@ import {
   Activity, Layers, Cpu, Cloud, FileText
 } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { copyToClipboard } from '../utils/clipboard';
 
 interface PWADeploymentCenterModalProps {
   onClose: () => void;
@@ -23,7 +24,7 @@ export const PWADeploymentCenterModal: React.FC<PWADeploymentCenterModalProps> =
   const directUrl = getDirectInstallUrl();
 
   const handleCopy = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
+    copyToClipboard(text);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 2500);
   };
@@ -264,19 +265,25 @@ chmod +x deploy.sh
 
                 {/* Actions */}
                 <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                  <button
-                    onClick={() => {
-                      if (isInstallable && !isIframe) {
-                        install();
-                      } else {
-                        window.open(directUrl, '_blank', 'noopener,noreferrer');
-                      }
-                    }}
-                    className="flex-1 bg-gradient-to-r from-accent to-accent2 hover:opacity-95 text-bg font-black py-3 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-all"
-                  >
-                    <Download size={16} />
-                    <span>{isInstallable && !isIframe ? 'تثبيت التطبيق الآن بنقرة واحدة' : 'فتح الرابط المباشر للتثبيت في المتصفح 🚀'}</span>
-                  </button>
+                  {isInstallable && !isIframe ? (
+                    <button
+                      onClick={() => install()}
+                      className="flex-1 bg-gradient-to-r from-accent to-accent2 hover:opacity-95 text-bg font-black py-3 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-all"
+                    >
+                      <Download size={16} />
+                      <span>تثبيت التطبيق الآن بنقرة واحدة</span>
+                    </button>
+                  ) : (
+                    <a
+                      href={directUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-1 bg-gradient-to-r from-accent to-accent2 hover:opacity-95 text-bg font-black py-3 px-4 rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg cursor-pointer transition-all"
+                    >
+                      <Download size={16} />
+                      <span>فتح الرابط المباشر للتثبيت في المتصفح 🚀</span>
+                    </a>
+                  )}
 
                   {isUpdateAvailable && (
                     <button

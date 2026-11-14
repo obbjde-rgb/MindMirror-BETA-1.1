@@ -5,18 +5,20 @@ import {
   Brain, FileText, Zap, ChevronLeft, Award, Layers, Globe
 } from 'lucide-react';
 import { PersonaData, PersonaComparisonResult } from '../types';
-import { getGeminiClient, withRetry } from '../utils/gemini';
+import { getGeminiClient, withRetry, parseJsonSafely } from '../utils/gemini';
 
 interface PersonaComparisonModalProps {
   isOpen: boolean;
   onClose: () => void;
   personas: Record<string, PersonaData>;
+  apiKey?: string;
 }
 
 export const PersonaComparisonModal: React.FC<PersonaComparisonModalProps> = ({
   isOpen,
   onClose,
-  personas
+  personas,
+  apiKey = ''
 }) => {
   const [selectedPersonaKeys, setSelectedPersonaKeys] = useState<string[]>(() => {
     const keys = Object.keys(personas);
@@ -86,7 +88,7 @@ ${selectedData}
 }
 `;
 
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const response = await withRetry(() => ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: promptText,
@@ -96,7 +98,10 @@ ${selectedData}
       }));
 
       const rawText = (response as any)?.text || '';
-      const parsed: PersonaComparisonResult = JSON.parse(rawText);
+      const parsed = parseJsonSafely<PersonaComparisonResult>(rawText);
+      if (!parsed || typeof parsed !== 'object' || !parsed.summary) {
+        throw new Error('تعذر تحليل نتيجة المقارنة بشكل صحيح');
+      }
       parsed.personasCompared = selectedPersonaKeys;
       setComparisonResult(parsed);
     } catch (err: any) {

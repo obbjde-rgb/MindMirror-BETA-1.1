@@ -17,8 +17,9 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { withRetry, sanitizeApiKey, getGeminiClient, normalizeGeminiModel } from '../utils/gemini';
+import { withRetry, getGeminiClient, normalizeGeminiModel } from '../utils/gemini';
 import { copyToClipboard } from '../utils/clipboard';
+import { safeStorage } from '../utils/storage';
 import { useToast } from './Toast';
 import { SavedConcept } from '../types';
 
@@ -61,7 +62,7 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
   useEffect(() => {
     if (isOpen && concept) {
       try {
-        const savedList = JSON.parse(localStorage.getItem('mindmirror_saved_concepts') || '[]');
+        const savedList = safeStorage.getJson<SavedConcept[]>('mindmirror_saved_concepts', []);
         const exists = savedList.some((item: SavedConcept) => item.concept === concept && item.personaName === personaName);
         setIsSaved(exists);
       } catch (e) {
@@ -73,7 +74,7 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
   const handleSaveConcept = () => {
     if (!explanation) return;
     try {
-      const savedList = JSON.parse(localStorage.getItem('mindmirror_saved_concepts') || '[]');
+      const savedList = safeStorage.getJson<SavedConcept[]>('mindmirror_saved_concepts', []);
       const existsIndex = savedList.findIndex((item: SavedConcept) => item.concept === concept && item.personaName === personaName);
       
       const newConceptItem: SavedConcept = {
@@ -93,7 +94,7 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
         savedList.unshift(newConceptItem);
       }
 
-      localStorage.setItem('mindmirror_saved_concepts', JSON.stringify(savedList));
+      safeStorage.setItem('mindmirror_saved_concepts', JSON.stringify(savedList));
       setIsSaved(true);
 
       toast({
@@ -233,7 +234,15 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
   // Handle Speech Synthesis
   const startSpeech = () => {
     if (!explanation) return;
-    
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      toast({
+        title: 'عذراً',
+        message: 'متصفحك لا يدعم القراءة الصوتية للنصوص.',
+        type: 'error'
+      });
+      return;
+    }
+
     window.speechSynthesis.cancel();
     
     // Clean markdown tags for clear speech
@@ -267,7 +276,9 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
   };
 
   const stopSpeech = () => {
-    window.speechSynthesis.cancel();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
     setIsSpeaking(false);
   };
 
@@ -371,12 +382,12 @@ export const ExplainerModal: React.FC<ExplainerModalProps> = ({
             )}
 
             {error ? (
-              <div className="flex flex-col items-center justify-center text-center p-6 bg-red-500/5 border border-sed-500/20 rounded-xl space-y-3">
+              <div className="flex flex-col items-center justify-center text-center p-6 bg-red-500/5 border border-red-500/20 rounded-xl space-y-3">
                 <AlertTriangle className="text-red-400" size={32} />
                 <p className="text-sm text-red-300 font-sans leading-relaxed max-w-sm">{error}</p>
                 <button 
                   onClick={generateExplanation}
-                  className="px-4 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-sed-500/30 rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  className="px-4 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                 >
                   <RefreshCw size={12} />
                   إعادة المحاولة

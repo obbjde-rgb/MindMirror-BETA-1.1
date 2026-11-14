@@ -13,6 +13,7 @@ import ConfirmModal from './ConfirmModal';
 import { InteractiveCodeBlock } from './InteractiveCodeBlock';
 import { copyToClipboard } from '../utils/clipboard';
 import { generateSubtitledVideo, downloadAllCachedAudioZip } from '../utils/videoGenerator';
+import { safeStorage } from '../utils/storage';
 
 interface AgiMessage {
   id: string;
@@ -63,7 +64,7 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
   const { toast } = useToast();
   const [messages, setMessages] = useState<AgiMessage[]>(() => {
     try {
-      const saved = localStorage.getItem('mindmirror_agi_messages');
+      const saved = safeStorage.getItem('mindmirror_agi_messages');
       return saved ? JSON.parse(saved) : [
         {
           id: 'welcome_agi',
@@ -131,11 +132,7 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
   }, [isOpen, messages]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('mindmirror_agi_messages', JSON.stringify(messages));
-    } catch (e) {
-      console.warn('[Storage] Failed to save AGI messages:', e);
-    }
+    safeStorage.setItem('mindmirror_agi_messages', JSON.stringify(messages));
   }, [messages]);
 
   const scrollToBottom = () => {
@@ -149,7 +146,9 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
     Array.from(files).forEach((file) => {
       const reader = new FileReader();
       reader.onload = (event) => {
-        const base64Data = (event.target?.result as string).split(',')[1];
+        const result = event.target?.result;
+        if (typeof result !== 'string' || !result.includes(',')) return;
+        const base64Data = result.split(',')[1];
         setAttachedFiles(prev => [
           ...prev,
           { name: file.name, mimeType: file.type || 'application/octet-stream', data: base64Data }
@@ -157,6 +156,7 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
       };
       reader.readAsDataURL(file);
     });
+    e.target.value = '';
   };
 
   const handleSendMessage = async () => {
@@ -172,8 +172,8 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
       files: [...attachedFiles]
     };
 
-    setMessages(prev => [...prev, userMsg]);
-    const currentPrompt = textVal;
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     if (textareaRef.current) textareaRef.current.value = '';
     setHasPromptText(false);
     setAttachedFiles([]);
@@ -207,8 +207,8 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
         systemInstruction += `\nأنت تعمل بوضع التقصي والبحث العميق (Deep Research Mode): قم بإحاطة كافة جوانب المسألة، تقديم هيكلية شاملة، إيراد التناقضات الفكرية، وتقديم خريطة حلول دقيقة.`;
       }
 
-      // Build chat history context
-      const chatContents = messages.filter(m => m.id !== 'welcome_agi').map(m => {
+      // Build chat history context including the newly submitted user message
+      const chatContents = nextMessages.filter(m => m.id !== 'welcome_agi').map(m => {
         const msgParts: any[] = [{ text: m.text }];
         if (m.files && m.files.length > 0) {
           m.files.forEach(f => {
@@ -811,11 +811,12 @@ export const AgiAssistantModal: React.FC<AgiAssistantModalProps> = ({
                           onClick={async () => {
                             try {
                               toast({ type: 'info', title: 'تحضير الفيديو...', message: 'جاري إنشاء وتسجيل فيديو المحادثة والكلمات المزامنة.' });
+                              const silentBytes = '\0'.repeat(24000);
                               await generateSubtitledVideo([{
                                 text: msg.text,
                                 personaName: 'المساعد الذكي AGI',
                                 role: 'model',
-                                base64Audio: btoa(String.fromCharCode(...new Uint8Array(24000)))
+                                base64Audio: btoa(silentBytes)
                               }], {
                                 title: 'إجابة المساعد الذكي AGI',
                                 modeLabel: 'فيديو مع الكلمات',

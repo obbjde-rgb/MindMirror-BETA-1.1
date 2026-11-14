@@ -6,7 +6,8 @@ import {
 } from 'lucide-react';
 import { useToast } from './Toast';
 import { SavedLesson } from '../types';
-import { getGeminiClient, parseJsonSafely, normalizeGeminiModel } from '../utils/gemini';
+import { getGeminiClient, parseJsonSafely, normalizeGeminiModel, withRetry } from '../utils/gemini';
+import { safeStorage } from '../utils/storage';
 
 interface ExtractLessonModalProps {
   isOpen: boolean;
@@ -14,6 +15,7 @@ interface ExtractLessonModalProps {
   messageText: string;
   personaName: string;
   personaLabel: string;
+  apiKey?: string;
 }
 
 export const ExtractLessonModal: React.FC<ExtractLessonModalProps> = ({
@@ -21,7 +23,8 @@ export const ExtractLessonModal: React.FC<ExtractLessonModalProps> = ({
   onClose,
   messageText,
   personaName,
-  personaLabel
+  personaLabel,
+  apiKey = ''
 }) => {
   const { toast } = useToast();
 
@@ -66,13 +69,13 @@ export const ExtractLessonModal: React.FC<ExtractLessonModalProps> = ({
     setAiSuccess(false);
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       let modelName = 'gemini-3-flash-preview';
       try {
-        const saved = localStorage.getItem('mindmirror_model');
+        const saved = safeStorage.getItem('mindmirror_model');
         if (saved) modelName = normalizeGeminiModel(saved);
       } catch (e) {
-        console.warn('[Storage] Failed to get model from localStorage:', e);
+        console.warn('[Storage] Failed to get model from storage:', e);
       }
 
       const prompt = `أنت الأستاذ الأكاديمي والخبير الجراحي في تحليل النصوص واستخلاص البصمات المعرفية.
@@ -100,11 +103,11 @@ ${messageText}
   "notes": "..."
 }`;
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: modelName,
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: { responseMimeType: "application/json" }
-      });
+      }));
 
       if (response.text) {
         const parsed = parseJsonSafely(response.text);
@@ -164,7 +167,7 @@ ${messageText}
     }
 
     try {
-      const existing: SavedLesson[] = JSON.parse(localStorage.getItem('mindmirror_saved_lessons') || '[]');
+      const existing = safeStorage.getJson<SavedLesson[]>('mindmirror_saved_lessons', []);
       const newLesson: SavedLesson = {
         id: 'lesson_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
         title: title.trim(),
@@ -179,7 +182,7 @@ ${messageText}
       };
 
       existing.unshift(newLesson);
-      localStorage.setItem('mindmirror_saved_lessons', JSON.stringify(existing));
+      safeStorage.setItem('mindmirror_saved_lessons', JSON.stringify(existing));
 
       toast({
         title: 'تم تدوين الدرس بالمحراب',

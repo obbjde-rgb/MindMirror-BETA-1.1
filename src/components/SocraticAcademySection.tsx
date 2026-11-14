@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GraduationCap, Award, BookOpen, MessageSquare, Send, Loader2, Sparkles, CheckCircle, HelpCircle, Trophy, Star, ArrowRight } from 'lucide-react';
 import { LearningPathway } from '../types';
-import { getGeminiClient } from '../utils/gemini';
+import { getGeminiClient, parseJsonSafely, withRetry } from '../utils/gemini';
 
 interface SocraticAcademySectionProps {
   onChatWithPerson: (name: string) => void;
@@ -120,21 +120,31 @@ export const SocraticAcademySection: React.FC<SocraticAcademySectionProps> = ({ 
 {
   "score": عدد_بين_50_و_100,
   "feedback": "ملاحظات نقدية وبناءة على منطق التلميذ ومدى تحليله في سطرين",
-  "mentorReply": "رد المعلم الحكيم بلسانه وتقمصه في 3 أسطر"،
+  "mentorReply": "رد المعلم الحكيم بلسانه وتقمصه في 3 أسطر",
   "badgeAwarded": "اسم وسام تقديري قصير (مثال: وسام الشك المنطقي أو وسام التخيل النسبي)"
 }
 عد بـ JSON Object فقط.`;
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
         config: { responseMimeType: 'application/json' }
-      });
+      }));
 
-      const data = JSON.parse(response.text || '{}');
-      if (data.score) {
-        setEvaluationResult(data);
-        setUserScore(prev => prev + data.score);
+      const data = parseJsonSafely<{
+        score?: number;
+        feedback?: string;
+        badgeAwarded?: string;
+        mentorReply?: string;
+      }>(response.text || '{}');
+      if (data && typeof data.score === 'number') {
+        setEvaluationResult({
+          score: data.score,
+          feedback: data.feedback || '',
+          badgeAwarded: data.badgeAwarded,
+          mentorReply: data.mentorReply || ''
+        });
+        setUserScore(prev => prev + (data.score || 0));
       }
     } catch (e) {
       console.error('Error evaluating answer:', e);

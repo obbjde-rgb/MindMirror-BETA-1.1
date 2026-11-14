@@ -106,7 +106,7 @@ export const TextDissectorModal: React.FC<TextDissectorModalProps> = ({
     setEntities([]);
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const prompt = `أنت محرك فائق لتفكيك النصوص المعرفية والتحليل الجراحي للنصوص والوعي.
 قم بتحليل النص التالي واستخراج كافة العناصر والكيانات المذكورة فيه صراحة أو ضمناً:
 1. الشخصيات والعقول والمفكرين (personalities)
@@ -178,7 +178,6 @@ ${textToProcess}
 
   // Fallback pattern parser for offline/fast entity detection
   const fallbackLocalParsing = (text: string) => {
-    const words = text.split(/\s+/);
     const mockEntities: ExtractedEntity[] = [];
 
     // Simple heuristic extraction for famous Arabic thinkers / concepts
@@ -234,7 +233,7 @@ ${textToProcess}
     });
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(apiKey);
       const fingerprintPrompt = `أنت مهندس وعي اصطناعي في مشروع MindMirror.
 قم بإنشاء "بصمة معرفية جراحية" وافية للكيان المعرفي: "${entity.name}" (${entity.categoryLabel}).
 

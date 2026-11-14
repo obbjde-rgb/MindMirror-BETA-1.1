@@ -6,6 +6,8 @@ import {
 } from 'lucide-react';
 import { GroundedImageResponse, GroundedImageResult } from '../types';
 import { getApiKey } from '../utils/gemini';
+import { copyToClipboard as copyTextToClipboard } from '../utils/clipboard';
+import ConfirmModal from './ConfirmModal';
 
 interface GroundedImageAssistantModalProps {
   isOpen: boolean;
@@ -44,6 +46,7 @@ export const GroundedImageAssistantModal: React.FC<GroundedImageAssistantModalPr
     enhancedPrompt: string;
     suggestedEnhancements: string[];
   } | null>(null);
+  const [imageToDeleteId, setImageToDeleteId] = useState<string | null>(null);
 
   const presets = [
     'المغرب وتطوير ميناء طنجة المتوسط',
@@ -210,16 +213,18 @@ export const GroundedImageAssistantModal: React.FC<GroundedImageAssistantModalPr
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedUrl(text);
-    setTimeout(() => setCopiedUrl(null), 2500);
+  const copyToClipboard = async (text: string) => {
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedUrl(text);
+      setTimeout(() => setCopiedUrl(null), 2500);
+    }
   };
 
   const currentCategoryTip = searchCategories.find(c => c.id === searchType)?.tip || '';
   const filteredArchive = savedArchive.filter(img => 
-    img.title.toLowerCase().includes(archiveSearchQuery.toLowerCase()) ||
-    img.description.toLowerCase().includes(archiveSearchQuery.toLowerCase())
+    (img.title || '').toLowerCase().includes(archiveSearchQuery.toLowerCase()) ||
+    (img.description || '').toLowerCase().includes(archiveSearchQuery.toLowerCase())
   );
 
   return (
@@ -477,7 +482,7 @@ export const GroundedImageAssistantModal: React.FC<GroundedImageAssistantModalPr
                           <div className="pt-2 border-t border-slate-800 flex items-center justify-between mt-2">
                             <span className="text-[10px] text-slate-500">{img.savedAt}</span>
                             <div className="flex items-center gap-1.5">
-                              <button onClick={() => handleDeleteFromArchive(img.id)} className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white transition-all">
+                              <button onClick={() => setImageToDeleteId(img.id)} className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500 hover:text-white transition-all" title="حذف من الأرشيف">
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                               {onInsertImageToChat && (
@@ -718,6 +723,21 @@ export const GroundedImageAssistantModal: React.FC<GroundedImageAssistantModalPr
           </motion.div>
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={!!imageToDeleteId}
+        title="حذف الصورة من الأرشيف"
+        message="هل أنت متأكد من رغبتك في حذف هذه الصورة من الأرشيف الشخصي نهائياً؟"
+        confirmText="نعم، احذف الصورة"
+        cancelText="إلغاء الأمر"
+        onConfirm={() => {
+          if (imageToDeleteId) {
+            handleDeleteFromArchive(imageToDeleteId);
+            setImageToDeleteId(null);
+          }
+        }}
+        onCancel={() => setImageToDeleteId(null)}
+      />
     </AnimatePresence>
   );
 };

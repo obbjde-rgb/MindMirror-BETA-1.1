@@ -42,8 +42,6 @@ export default function ChatInputArea({ onSendMessage, isLoading, onStop, active
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [attachedFiles, setAttachedFiles] = useState<{name: string, mimeType: string, data: string}[]>([]);
   const recognitionRef = useRef<any>(null);
-
-  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const isRecognitionRunningRef = useRef(false);
 
   // Timer for voice recording
@@ -82,7 +80,6 @@ export default function ChatInputArea({ onSendMessage, isLoading, onStop, active
         recognition.onstart = () => {
           isRecognitionRunningRef.current = true;
           setIsRecording(true);
-          setMicPermissionDenied(false);
         };
 
         recognition.onresult = (event: any) => {
@@ -155,7 +152,6 @@ export default function ChatInputArea({ onSendMessage, isLoading, onStop, active
       setIsRecording(false);
     } else {
       try {
-        setMicPermissionDenied(false);
         recognitionRef.current.start();
         isRecognitionRunningRef.current = true;
         setIsRecording(true);
@@ -196,7 +192,10 @@ export default function ChatInputArea({ onSendMessage, isLoading, onStop, active
       
       const reader = new FileReader();
       reader.onload = (event) => {
-        const base64Data = (event.target?.result as string).split(',')[1];
+        const result = event.target?.result;
+        if (typeof result !== 'string') return;
+        const base64Data = result.split(',')[1] || '';
+        if (!base64Data) return;
         setAttachedFiles(prev => [...prev, {
           name: file.name,
           mimeType: file.type || 'audio/mp3',

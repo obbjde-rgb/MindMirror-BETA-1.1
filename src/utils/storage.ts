@@ -86,6 +86,15 @@ class SafeStorage {
     }
   }
 
+  public removeSessionItem(key: string): void {
+    try {
+      if (typeof window === 'undefined') return;
+      sessionStorage.removeItem(key);
+    } catch (e) {
+      logger.warn(`[SafeStorage] Failed to remove item "${key}" from sessionStorage:`, e);
+    }
+  }
+
   public parseJSON<T>(key: string, defaultValue: T): T {
     const value = this.getItem(key);
     if (!value) return defaultValue;
@@ -95,6 +104,10 @@ class SafeStorage {
       logger.error(`[SafeStorage] JSON parse error for key "${key}":`, e);
       return defaultValue;
     }
+  }
+
+  public getJson<T>(key: string, defaultValue: T): T {
+    return this.parseJSON<T>(key, defaultValue);
   }
 
   private attemptEmergencyCleanup(): void {

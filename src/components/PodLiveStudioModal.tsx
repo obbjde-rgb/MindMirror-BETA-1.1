@@ -17,6 +17,7 @@ import {
   PunctualSFXType
 } from '../utils/podLiveAudioEngine';
 import { getGeminiClient, withRetry, parseJsonSafely } from '../utils/gemini';
+import { copyToClipboard } from '../utils/clipboard';
 import { useToast } from './Toast';
 
 export interface PodLiveTurn {
@@ -165,6 +166,12 @@ export const PodLiveStudioModal: React.FC<PodLiveStudioModalProps> = ({
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      podLiveEngine.stopSpeech();
+      podLiveEngine.stopAmbient();
+      podLiveEngine.stopMasterRecording().catch(() => {});
     };
   }, [show]);
 
@@ -358,7 +365,7 @@ ${g2 ? `3. الضيف الثاني: "${g2}" (المفتاح: "${guest2Key}")` : 
 
           const b64 = res?.data || res?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
           if (b64) {
-            turn.base64Audio = b64;
+            setScriptTurns(prev => prev.map(t => (t.id === turn.id ? { ...t, base64Audio: b64 } : t)));
             return b64;
           }
         } catch (e) {
@@ -476,13 +483,15 @@ ${g2 ? `3. الضيف الثاني: "${g2}" (المفتاح: "${guest2Key}")` : 
     setCurrentPlayingIndex(null);
   };
 
-  const handleCopyScript = () => {
+  const handleCopyScript = async () => {
     if (scriptTurns.length === 0) return;
     const text = scriptTurns.map(t => `[${t.speakerName} (${t.vocalExpression}${t.sfxCue ? ' | ' + t.sfxCue : ''})]:\n${t.text}\n`).join('\n');
-    navigator.clipboard.writeText(text);
-    setIsCopied(true);
-    setTimeout(() => setIsCopied(false), 2500);
-    toast({ title: 'تم النسخ', message: 'تم نسخ السيناريو إلى الحافظة.', type: 'success' });
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2500);
+      toast({ title: 'تم النسخ', message: 'تم نسخ السيناريو إلى الحافظة.', type: 'success' });
+    }
   };
 
   const handleDownloadMaster = () => {
@@ -490,10 +499,11 @@ ${g2 ? `3. الضيف الثاني: "${g2}" (المفتاح: "${guest2Key}")` : 
       toast({ title: 'تنبيه', message: 'فعّل "تسجيل الماستر" ثم شغّل الحلقة لتسجيلها.', type: 'info' });
       return;
     }
+    const ext = recordedMasterBlob.type.includes('mp4') ? 'mp4' : 'webm';
     const url = URL.createObjectURL(recordedMasterBlob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `podlive_master_${Date.now()}.webm`;
+    a.download = `podlive_master_${Date.now()}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

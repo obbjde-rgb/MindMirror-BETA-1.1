@@ -24,6 +24,12 @@ const getSimulationScore = (text: string, personaKey: string, storedScore?: numb
   return score;
 };
 
+const isSafeExternalUrl = (uri?: string): boolean => {
+  if (!uri || typeof uri !== 'string') return false;
+  const trimmed = uri.trim();
+  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('#');
+};
+
 interface MessageBubbleProps {
   msg: Message;
   idx: number;
@@ -173,7 +179,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
                     ) : (
                       <div className="aspect-video bg-surface2 flex flex-col items-center justify-center p-3 text-muted">
                         <File size={32} className="mb-2" />
-                        <span className="text-[10px] uppercase tracking-wider">{f.mimeType.split('/')[1]}</span>
+                        <span className="text-[10px] uppercase tracking-wider">{(f.mimeType || '').split('/')[1] || 'FILE'}</span>
                       </div>
                     )}
                     <div className="p-2 flex items-center gap-2">
@@ -250,7 +256,12 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
                           const cleanHref = href.includes('rag://') 
                             ? href.split('rag://')[1] 
                             : href.split('#rag-')[1];
-                          const contextText = decodeURIComponent(cleanHref);
+                          let contextText = cleanHref || '';
+                          try {
+                            contextText = decodeURIComponent(cleanHref || '');
+                          } catch {
+                            contextText = cleanHref || '';
+                          }
                           const conceptText = typeof children === 'string' ? children : String(children);
                           const speakerName = msgPersona?.label || msgPersonaKey;
                           return (
@@ -265,6 +276,9 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
                               {children}
                             </RagTooltip>
                           );
+                        }
+                        if (!isSafeExternalUrl(href)) {
+                          return <span className="text-muted underline">{children}</span>;
                         }
                         return <a href={href} className="text-accent underline hover:text-accent2" target="_blank" rel="noopener noreferrer" {...props}>{children}</a>;
                       },
@@ -301,7 +315,7 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
                     <span>المصادر والمراجع التي تم البحث فيها:</span>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {msg.sources.map((src, sIdx) => (
+                    {msg.sources.filter(src => isSafeExternalUrl(src.uri)).map((src, sIdx) => (
                       <a
                         key={sIdx}
                         href={src.uri}
@@ -424,9 +438,13 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({
 }
 
 export default React.memo(MessageBubble, (prevProps, nextProps) => {
+  const prevPKey = prevProps.msg.persona || prevProps.activePersona;
+  const nextPKey = nextProps.msg.persona || nextProps.activePersona;
   return (
     prevProps.msg.text === nextProps.msg.text &&
     prevProps.msg.role === nextProps.msg.role &&
+    prevProps.msg.sources === nextProps.msg.sources &&
+    prevProps.msg.files === nextProps.msg.files &&
     prevProps.activePersona === nextProps.activePersona &&
     prevProps.isLoading === nextProps.isLoading &&
     prevProps.isLastMessage === nextProps.isLastMessage &&
@@ -435,6 +453,8 @@ export default React.memo(MessageBubble, (prevProps, nextProps) => {
     (prevProps.copiedIndex === prevProps.idx) === (nextProps.copiedIndex === nextProps.idx) &&
     prevProps.isTTSLoading === nextProps.isTTSLoading &&
     prevProps.editValue === nextProps.editValue &&
-    prevProps.personas[prevProps.msg.persona || prevProps.activePersona]?.icon === nextProps.personas[nextProps.msg.persona || nextProps.activePersona]?.icon
+    prevProps.personas[prevPKey]?.icon === nextProps.personas[nextPKey]?.icon &&
+    prevProps.personas[prevPKey]?.color === nextProps.personas[nextPKey]?.color &&
+    prevProps.personas[prevPKey]?.label === nextProps.personas[nextPKey]?.label
   );
 });

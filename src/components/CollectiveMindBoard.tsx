@@ -7,6 +7,8 @@ import {
 } from 'lucide-react';
 import { PersonaData, SchoolOfThought } from '../types';
 import { getGeminiClient, parseJsonSafely } from '../utils/gemini';
+import { safeStorage } from '../utils/storage';
+import ConfirmModal from './ConfirmModal';
 
 interface CollectiveMindBoardProps {
   personas: Record<string, PersonaData>;
@@ -119,10 +121,12 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
 }) => {
   const [schools, setSchools] = useState<SchoolOfThought[]>(() => {
     try {
-      const saved = localStorage.getItem('mindmirror_custom_schools');
+      const saved = safeStorage.getItem('mindmirror_custom_schools');
       if (saved) {
         const parsed = JSON.parse(saved);
-        return [...DEFAULT_SCHOOLS, ...parsed];
+        if (Array.isArray(parsed)) {
+          return [...DEFAULT_SCHOOLS, ...parsed];
+        }
       }
     } catch (e) {
       console.error('[Storage] Failed to load custom schools:', e);
@@ -134,6 +138,7 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
   const [selectedSchool, setSelectedSchool] = useState<SchoolOfThought>(schools[0]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedPersonaFilter, setSelectedPersonaFilter] = useState<string | null>(null);
+  const [schoolToDeleteId, setSchoolToDeleteId] = useState<string | null>(null);
 
   // New School Modal State
   const [showAddModal, setShowAddModal] = useState(false);
@@ -155,11 +160,7 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
   const saveCustomSchools = (updatedList: SchoolOfThought[]) => {
     setSchools(updatedList);
     const customOnly = updatedList.filter(s => s.isCustom);
-    try {
-      localStorage.setItem('mindmirror_custom_schools', JSON.stringify(customOnly));
-    } catch (e) {
-      console.warn('[Storage] Failed to save custom schools:', e);
-    }
+    safeStorage.setItem('mindmirror_custom_schools', JSON.stringify(customOnly));
   };
 
   const handleCreateCustomSchoolWithAI = async () => {
@@ -250,8 +251,7 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
     }
   };
 
-  const handleDeleteCustomSchool = (schoolId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const confirmDeleteCustomSchool = (schoolId: string) => {
     const updated = schools.filter(s => s.id !== schoolId);
     saveCustomSchools(updated);
     if (selectedSchool.id === schoolId) {
@@ -271,6 +271,17 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
     launchGroupSession(symposiumMinds, symposiumQuestion);
   };
 
+  const matchesActiveEra = (school: SchoolOfThought, eraFilter: string): boolean => {
+    if (eraFilter === 'all') return true;
+    const eraText = `${school.id} ${school.era} ${school.name}`.toLowerCase();
+    if (eraFilter === 'ancient') return eraText.includes('قبل الميلاد') || eraText.includes('ق.م') || eraText.includes('القديم') || school.id === 'aristotelian';
+    if (eraFilter === 'golden') return eraText.includes('1332') || eraText.includes('1406') || eraText.includes('الذهبي') || eraText.includes('إسلامي') || school.id === 'khaldunian';
+    if (eraFilter === 'enlightenment') return eraText.includes('تنوير') || eraText.includes('نهضة') || /1[5-8]\d{2}/.test(eraText);
+    if (eraFilter === 'cybernetics') return eraText.includes('1900') || eraText.includes('1950') || eraText.includes('حوسبة') || eraText.includes('فيزياء') || school.id === 'cybernetic';
+    if (eraFilter === 'agi') return eraText.includes('1976') || eraText.includes('الحاضر') || eraText.includes('حديث') || eraText.includes('معاصر') || eraText.includes('agi') || eraText.includes('رقمي') || eraText.includes('مستقبل') || school.id === 'jobsian';
+    return true;
+  };
+
   // Filtered schools
   const filteredSchools = schools.filter(s => {
     const matchesSearch = searchQuery === '' || 
@@ -279,7 +290,8 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
       s.keyMinds.some(m => m.includes(searchQuery));
     
     const matchesPersona = !selectedPersonaFilter || s.keyMinds.includes(selectedPersonaFilter);
-    return matchesSearch && matchesPersona;
+    const matchesEra = matchesActiveEra(s, activeEra);
+    return matchesSearch && matchesPersona && matchesEra;
   });
 
   return (
@@ -436,7 +448,10 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
                     </div>
                     {school.isCustom && (
                       <button
-                        onClick={(e) => handleDeleteCustomSchool(school.id, e)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSchoolToDeleteId(school.id);
+                        }}
                         className="text-muted hover:text-red-400 p-1 transition-colors cursor-pointer"
                         title="حذف هذه المدرسة المخصصة"
                       >
@@ -737,6 +752,21 @@ export const CollectiveMindBoard: React.FC<CollectiveMindBoardProps> = ({
           </div>
         )}
       </AnimatePresence>
+
+      <ConfirmModal
+        isOpen={!!schoolToDeleteId}
+        title="حذف المدرسة الفكرية المخصصة"
+        message="هل أنت متأكد من رغبتك في حذف هذه المدرسة الفكرية المخصصة نهائياً؟"
+        confirmText="نعم، احذف المدرسة"
+        cancelText="إلغاء الأمر"
+        onConfirm={() => {
+          if (schoolToDeleteId) {
+            confirmDeleteCustomSchool(schoolToDeleteId);
+            setSchoolToDeleteId(null);
+          }
+        }}
+        onCancel={() => setSchoolToDeleteId(null)}
+      />
     </div>
   );
 };

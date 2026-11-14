@@ -7,6 +7,29 @@ interface DebugConsoleProps {
   onClose: () => void;
 }
 
+const safeStringifyDetails = (details: unknown): string => {
+  if (typeof details !== 'object' || details === null) return String(details);
+  try {
+    const seen = new WeakSet<object>();
+    return JSON.stringify(
+      details,
+      (_key, value) => {
+        if (value instanceof Error) {
+          return { name: value.name, message: value.message, stack: value.stack };
+        }
+        if (typeof value === 'object' && value !== null) {
+          if (seen.has(value)) return '[Circular]';
+          seen.add(value);
+        }
+        return value;
+      },
+      2
+    );
+  } catch {
+    return String(details);
+  }
+};
+
 export const DebugConsole: React.FC<DebugConsoleProps> = ({ isOpen, onClose }) => {
   const [logs, setLogs] = useState<LogEntry[]>(logger.getLogs());
   const [filter, setFilter] = useState<'all' | 'info' | 'warn' | 'error'>('all');
@@ -125,7 +148,7 @@ export const DebugConsole: React.FC<DebugConsoleProps> = ({ isOpen, onClose }) =
                  
                  {isExpanded && log.details && (
                    <div className="px-8 pb-2 pt-1 border-t border-text/5 overflow-x-auto text-text/70 whitespace-pre text-[10px] sm:text-xs">
-                     {typeof log.details === 'object' ? JSON.stringify(log.details, null, 2) : String(log.details)}
+                     {safeStringifyDetails(log.details)}
                    </div>
                  )}
                </div>

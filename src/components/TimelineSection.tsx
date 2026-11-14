@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Clock, Search, Sparkles, UserCheck, MessageSquare, Compass, ArrowRight, Loader2, Calendar, Zap } from 'lucide-react';
 import { TimelineMilestone } from '../types';
-import { getGeminiClient } from '../utils/gemini';
+import { getGeminiClient, parseJsonSafely, withRetry } from '../utils/gemini';
 
 interface TimelineSectionProps {
   onChatWithPerson: (name: string) => void;
@@ -132,15 +132,15 @@ export const TimelineSection: React.FC<TimelineSectionProps> = ({ onChatWithPers
 عد بـ JSON فقط.`;
       }
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
         config: {
           responseMimeType: 'application/json'
         }
-      });
+      }));
 
-      const parsed = JSON.parse(response.text || '[]');
+      const parsed = parseJsonSafely<TimelineMilestone[]>(response.text || '[]');
       if (Array.isArray(parsed) && parsed.length > 0) {
         setCustomMilestones(parsed);
       }

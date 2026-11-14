@@ -3,6 +3,7 @@ import { X, Check, Plus, Swords, Settings, GraduationCap, Sparkles, Users, Chevr
 import { PersonaData } from '../types';
 import { initialPersonas } from '../constants';
 import { useDragScroll } from '../hooks/useDragScroll';
+import ConfirmModal from './ConfirmModal';
 
 const ICON_MAP: Record<string, React.FC<any>> = {
   User, Bot, Sparkles, Brain, Zap, Coffee, Cloud, Moon, Sun, Ghost, Heart, Star, Crown, Rocket, Search, MessageCircle, Shield, Activity, Flame, Music, Briefcase, GraduationCap, Palette, Terminal, Globe, Microscope, Calculator, Radar
@@ -52,6 +53,7 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
   setShowChatSearchModal
 }) => {
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [roomToClear, setRoomToClear] = useState<{ key: string; label: string } | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const chipsScroll = useDragScroll();
 
@@ -127,17 +129,19 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
                   </button>
                   <div className="flex items-center gap-1 shrink-0 ms-1">
                     {isActive && <Check size={13} className="text-accent shrink-0" />}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deletePersona(name, e);
-                      }}
-                      className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-red-500/20 transition-all cursor-pointer opacity-70 group-hover/item:opacity-100"
-                      title={`حذف شخصية ${name}`}
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    {!isInitial && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deletePersona(name, e);
+                        }}
+                        className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-red-500/20 transition-all cursor-pointer opacity-70 group-hover/item:opacity-100"
+                        title={`حذف شخصية ${name}`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -257,10 +261,7 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const newHistory = { ...chatHistory };
-                delete newHistory['debate'];
-                setChatHistory(newHistory);
-                if (activePersona === 'debate') setActivePersona(Object.keys(personas).filter(p => p !== 'debate' && p !== 'group_question' && p !== 'osint_room' && p !== 'trend_live')[0] || 'ستيف جوبز');
+                setRoomToClear({ key: 'debate', label: 'المناظرة' });
               }}
               className="absolute -top-2 -right-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all duration-200"
               title="مسح المناظرة"
@@ -287,10 +288,7 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const newHistory = { ...chatHistory };
-                delete newHistory['group_question'];
-                setChatHistory(newHistory);
-                if (activePersona === 'group_question') setActivePersona(Object.keys(personas).filter(p => p !== 'debate' && p !== 'group_question' && p !== 'osint_room' && p !== 'trend_live')[0] || 'ستيف جوبز');
+                setRoomToClear({ key: 'group_question', label: 'سؤال جماعي' });
               }}
               className="absolute -top-2 -right-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all duration-200"
               title="مسح السؤال الجماعي"
@@ -318,10 +316,7 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const newHistory = { ...chatHistory };
-                delete newHistory['osint_room'];
-                setChatHistory(newHistory);
-                if (activePersona === 'osint_room') setActivePersona(Object.keys(personas).filter(p => p !== 'debate' && p !== 'group_question' && p !== 'osint_room' && p !== 'trend_live')[0] || 'ستيف جوبز');
+                setRoomToClear({ key: 'osint_room', label: 'تحقيق OSINT' });
               }}
               className="absolute -top-2 -right-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all duration-200"
               title="مسح جلسة الاستخبارات"
@@ -350,10 +345,7 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const newHistory = { ...chatHistory };
-                delete newHistory['trend_live'];
-                setChatHistory(newHistory);
-                if (activePersona === 'trend_live') setActivePersona(Object.keys(personas).filter(p => p !== 'debate' && p !== 'group_question' && p !== 'osint_room' && p !== 'trend_live')[0] || 'ستيف جوبز');
+                setRoomToClear({ key: 'trend_live', label: 'جلسة تريند لايف' });
               }}
               className="absolute -top-2 -right-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all duration-200"
               title="مسح جلسة تريند لايف"
@@ -401,6 +393,29 @@ export const PersonaSelector: React.FC<PersonaSelectorProps> = ({
           </div>
         ))}
       </div>
+
+      <ConfirmModal
+        isOpen={!!roomToClear}
+        title={`مسح ${roomToClear?.label || 'الجلسة'}`}
+        message={`هل أنت متأكد من رغبتك في مسح سجل "${roomToClear?.label || 'الجلسة'}" بالكامل؟ لا يمكن التراجع عن هذا الإجراء.`}
+        confirmText="نعم، امسح السجل"
+        cancelText="إلغاء الأمر"
+        onConfirm={() => {
+          if (roomToClear) {
+            const targetKey = roomToClear.key;
+            setChatHistory(prev => {
+              const newHistory = { ...prev };
+              delete newHistory[targetKey];
+              return newHistory;
+            });
+            if (activePersona === targetKey) {
+              setActivePersona(Object.keys(personas).filter(p => p !== 'debate' && p !== 'group_question' && p !== 'osint_room' && p !== 'trend_live')[0] || 'ستيف جوبز');
+            }
+            setRoomToClear(null);
+          }
+        }}
+        onCancel={() => setRoomToClear(null)}
+      />
     </div>
   );
 };

@@ -5,6 +5,7 @@ import {
   X, Sparkles, ShieldCheck, Zap, Server, Share2, Info
 } from 'lucide-react';
 import { PERMANENT_PRODUCTION_APP_URL } from '../constants';
+import { copyToClipboard } from '../utils/clipboard';
 
 interface PWAInstallButtonProps {
   variant?: 'default' | 'full-banner' | 'header' | 'header-bar' | 'top-banner' | 'minimal';
@@ -26,13 +27,9 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
   const directUrl = getDirectInstallUrl();
 
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(directUrl);
+    copyToClipboard(directUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
-  };
-
-  const handleLaunchProduction = () => {
-    window.open(directUrl, '_blank', 'noopener,noreferrer');
   };
 
   const handleButtonClick = async () => {
@@ -257,13 +254,15 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
                 افتح المنصة مباشرة في نافذة مستقلة عبر رابط الإنتاج الرسمي. سيظهر لك المتصفح خيار التثبيت الفوري في شريط العنوان أو القائمة فوراً:
               </p>
               <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                <button
-                  onClick={handleLaunchProduction}
+                <a
+                  href={directUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-extrabold text-xs shadow-lg shadow-cyan-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
                 >
                   <ExternalLink size={15} />
                   <span>فتح وتثبيت فوري برابط الإنتاج 🚀</span>
-                </button>
+                </a>
                 <button
                   onClick={handleCopyLink}
                   className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs border border-slate-700 transition-all flex items-center justify-center gap-2 cursor-pointer"

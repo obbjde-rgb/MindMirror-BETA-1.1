@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Users, Sparkles, Plus, Play, Send, Loader2, CheckCircle2, ArrowRight, BookOpen, ShieldCheck, Cpu } from 'lucide-react';
 import { SchoolOfThought } from '../types';
-import { getGeminiClient } from '../utils/gemini';
+import { getGeminiClient, parseJsonSafely, withRetry } from '../utils/gemini';
 
 interface SchoolsOfThoughtSectionProps {
   onChatWithPerson: (name: string) => void;
@@ -148,10 +148,10 @@ export const SchoolsOfThoughtSection: React.FC<SchoolsOfThoughtSectionProps> = (
 قم بصياغة إجابة بليغة ومعمقة ومبرهنة كإجابة رسمية تمثل أسلوب وقناعات هذه المدرسة الفكرية بالكامل.
 تحدث بلسان المتحدث باسم هذه المدرسة وبأسلوب فكري رفيع باللغة العربية.`;
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt
-      });
+      }));
 
       setTestResponse(response.text?.trim() || 'لم يتم استلام استجابة.');
     } catch (e) {
@@ -191,16 +191,16 @@ export const SchoolsOfThoughtSection: React.FC<SchoolsOfThoughtSectionProps> = (
 }
 عد بـ JSON Object فقط بدون أية نصوص إضافية.`;
 
-      const response = await ai.models.generateContent({
+      const response = await withRetry(() => ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
         config: {
           responseMimeType: 'application/json'
         }
-      });
+      }));
 
-      const data = JSON.parse(response.text || '{}');
-      if (data.name) {
+      const data = parseJsonSafely<SchoolOfThought>(response.text || '{}');
+      if (data && data.name) {
         data.isCustom = true;
         setSchools(prev => [data, ...prev]);
         setSelectedSchool(data);
