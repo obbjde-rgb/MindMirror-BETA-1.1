@@ -59,6 +59,7 @@ import { PWAInstallButton } from './components/PWAInstallButton';
 import { PodLiveStudioModal } from './components/PodLiveStudioModal';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { safeStorage } from './utils/storage';
+import { saveClonedVoice } from './utils/clonedVoices';
 
 
 const fadeInVariants = {
@@ -762,7 +763,33 @@ export default function App() {
           setDynamicAudioModels(uniqueAudioModels);
           safeStorage.setItem('mindmirror_dynamicAudioModels', JSON.stringify(uniqueAudioModels));
           
-          const uniqueVoices = Array.from(new Set([...dynamicVoices, ...DEFAULT_30_VOICES]));
+          let syncedCloudVoiceNames: string[] = [];
+          try {
+            const voicesRes = await fetch(`/api/voices${keyToUse ? `?apiKey=${encodeURIComponent(keyToUse)}` : ''}`);
+            if (voicesRes.ok) {
+              const voicesData = await voicesRes.json();
+              if (Array.isArray(voicesData?.voices)) {
+                for (const v of voicesData.voices) {
+                  const vid = v?.id || (typeof v?.name === 'string' ? v.name.replace(/^voices\//, '') : '');
+                  const vName = (v?.display_name || vid || '').trim();
+                  if (vid && vName) {
+                    saveClonedVoice({
+                      displayName: vName,
+                      voiceId: vid,
+                      type: 'replicated',
+                      model: v?.model || 'gemini-3.8-flash-tts',
+                      createdAt: Date.now()
+                    });
+                    syncedCloudVoiceNames.push(vName);
+                  }
+                }
+              }
+            }
+          } catch {
+            // Optional sync failure does not block models update
+          }
+
+          const uniqueVoices = Array.from(new Set([...syncedCloudVoiceNames, ...dynamicVoices, ...DEFAULT_30_VOICES]));
           setDynamicVoices(uniqueVoices);
           safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(uniqueVoices));
           
@@ -3971,6 +3998,21 @@ ${investigationText}`;
           const updated = dynamicVoices.filter(v => v !== removedVoice);
           setDynamicVoices(updated);
           safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
+          setPersonas(prev => {
+            let changed = false;
+            const next = { ...prev };
+            for (const [k, p] of Object.entries(next)) {
+              if (p.voice === removedVoice) {
+                next[k] = { ...p, voice: 'Puck' };
+                changed = true;
+              }
+            }
+            if (changed) {
+              safeStorage.setItem('mindmirror_personas', JSON.stringify(next));
+              return next;
+            }
+            return prev;
+          });
         }}
         updateModelsAndVoices={updateModelsAndVoices}
         isUpdatingModels={isUpdatingModels}

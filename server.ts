@@ -434,101 +434,507 @@ async function startServer() {
     });
   });
 
-  // Voice Replication API with 50MB limit & guaranteed JSON response
-  const upload = multer({ 
+  // Voice Replication API (Real Google Gemini Voices API via @google/genai)
+  const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 50 * 1024 * 1024 }
   });
 
+  const normalizeAudioMime = (mimetype?: string): string => {
+    const clean = (mimetype || '').split(';')[0].trim().toLowerCase();
+    if (!clean || clean === 'application/octet-stream') return 'audio/wav';
+    if (clean === 'audio/x-wav' || clean === 'audio/wave') return 'audio/wav';
+    return clean;
+  };
+
+  const formatVoiceReplicationError = (rawMessage: string, statusCode?: number): string => {
+    const lower = rawMessage.toLowerCase();
+    if (statusCode === 403 || lower.includes('permission_denied') || lower.includes('tier') || lower.includes('billing') || lower.includes('allowlist') || lower.includes('not enabled')) {
+      return 'يتطلب استنساخ الصوت الحقيقي (Voice Replication) مفتاح Gemini API من الفئة المدفوعة (Tier 1 فأعلى) أو حساباً مفعلاً عليه واجهة Voices API.';
+    }
+    if (lower.includes('consent') || lower.includes('speaker') || lower.includes('mismatch') || lower.includes('phrase') || lower.includes('watermark') || lower.includes('synthid')) {
+      return 'تعذر التحقق البيومتري من عينة الموافقة أو تطابق المتحدث. تأكد من قراءة نص الإقرار المطلوب حرفياً وبوضوح، ومن تطابق المتحدث والميكروفون مع العينة المرجعية.';
+    }
+    if (lower.includes('does not support voice replication')) {
+      return 'النموذج المحدد لا يدعم عملية إنشاء البصمة الصوتية؛ يجب إنشاء الصوت عبر gemini-3.8-flash-tts ثم استخدامه في النطق على أي نموذج TTS.';
+    }
+    if (statusCode === 400 || lower.includes('invalid_argument') || lower.includes('duration') || lower.includes('too short') || lower.includes('too long')) {
+      return 'بيانات الصوت غير مقبولة من المحرك. تأكد من تسجيل عينة مرجعية واضحة (10–30 ثانية) وعينة موافقة لفظية كاملة بصيغة WAV 24kHz أحادية القناة.';
+    }
+    if (statusCode === 429 || lower.includes('resource_exhausted') || lower.includes('quota')) {
+      return 'تم الوصول للحد الأقصى لحصة استنساخ أو تخزين الأصوات في المشروع (200 صوت كحد أقصى أو حد الطلبات).';
+    }
+    return rawMessage || 'تعذر إتمام استنساخ الصوت عبر خادم Gemini API.';
+  };
+
+  app.get("/api/voices", async (req, res) => {
+    const clientApiKey = (typeof req.query.apiKey === 'string' && req.query.apiKey.trim() && req.query.apiKey !== 'undefined')
+      ? req.query.apiKey.trim()
+      : undefined;
+    const pool = getActiveKeyPool(clientApiKey);
+    const keysToTry: (string | null)[] = [...pool];
+    if (!clientApiKey && !keysToTry.includes(null)) keysToTry.unshift(null);
+    if (clientApiKey && !keysToTry.includes(null)) keysToTry.push(null);
+
+    let lastErr: any = null;
+    for (const apiKey of keysToTry) {
+      const finalKey = apiKey !== null ? apiKey : (SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || process.env.AISTUDIO_API_KEY || process.env.GOOGLE_API_KEY || '');
+      if (!finalKey && apiKey !== null) continue;
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: finalKey,
+          httpOptions: { apiVersion: 'v1beta', headers: { 'User-Agent': 'aistudio-build' } }
+        });
+        const listRes: any = await ai.voices.list({ type: ['replicated'], page_size: 200 });
+        const voices = Array.isArray(listRes?.voices) ? listRes.voices : [];
+        return res.json({ voices, next_page_token: listRes?.next_page_token || null });
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    return res.status(lastErr?.status || 500).json({ error: lastErr?.message || 'فشل جلب قائمة الأصوات المستنسخة', voices: [] });
+  });
+
+  app.get("/api/voices/:id", async (req, res) => {
+    const rawId = decodeURIComponent(req.params.id || '').trim();
+    if (!rawId) return res.status(400).json({ error: 'معرف الصوت مطلوب' });
+    if (rawId.startsWith('voicekey_')) {
+      return res.json({ key: rawId, type: 'replicated', stateless: true });
+    }
+    const cleanVoiceId = rawId.startsWith('voices/') ? rawId.slice('voices/'.length) : rawId;
+    const clientApiKey = (typeof req.query.apiKey === 'string' && req.query.apiKey.trim() && req.query.apiKey !== 'undefined')
+      ? req.query.apiKey.trim()
+      : undefined;
+    const pool = getActiveKeyPool(clientApiKey);
+    const keysToTry: (string | null)[] = [...pool];
+    if (!clientApiKey && !keysToTry.includes(null)) keysToTry.unshift(null);
+    if (clientApiKey && !keysToTry.includes(null)) keysToTry.push(null);
+
+    let lastErr: any = null;
+    for (const apiKey of keysToTry) {
+      const finalKey = apiKey !== null ? apiKey : (SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || process.env.AISTUDIO_API_KEY || process.env.GOOGLE_API_KEY || '');
+      if (!finalKey && apiKey !== null) continue;
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: finalKey,
+          httpOptions: { apiVersion: 'v1beta', headers: { 'User-Agent': 'aistudio-build' } }
+        });
+        const voice = await ai.voices.get(cleanVoiceId);
+        return res.json({ voice });
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    return res.status(lastErr?.status || 500).json({ error: lastErr?.message || 'تعذر جلب بيانات الصوت من الخادم السحابي' });
+  });
+
+  app.delete("/api/voices/:id", async (req, res) => {
+    const rawId = decodeURIComponent(req.params.id || '').trim();
+    if (!rawId) return res.status(400).json({ error: 'معرف الصوت مطلوب' });
+    if (rawId.startsWith('voicekey_')) {
+      return res.json({ deleted: true, stateless: true });
+    }
+    // @google/genai voicesDelete constructs /{api_version}/voices/{voicesId}, so pass bare ID without 'voices/' prefix
+    const cleanVoiceId = rawId.startsWith('voices/') ? rawId.slice('voices/'.length) : rawId;
+    const rawKey = (req.body?.apiKey || req.query?.apiKey) as string | undefined;
+    const clientApiKey = (rawKey && typeof rawKey === 'string' && rawKey.trim() && rawKey !== 'undefined') ? rawKey.trim() : undefined;
+    const pool = getActiveKeyPool(clientApiKey);
+    const keysToTry: (string | null)[] = [...pool];
+    if (!clientApiKey && !keysToTry.includes(null)) keysToTry.unshift(null);
+    if (clientApiKey && !keysToTry.includes(null)) keysToTry.push(null);
+
+    let lastErr: any = null;
+    for (const apiKey of keysToTry) {
+      const finalKey = apiKey !== null ? apiKey : (SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || process.env.AISTUDIO_API_KEY || process.env.GOOGLE_API_KEY || '');
+      if (!finalKey && apiKey !== null) continue;
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: finalKey,
+          httpOptions: { apiVersion: 'v1beta', headers: { 'User-Agent': 'aistudio-build' } }
+        });
+        await ai.voices.delete(cleanVoiceId);
+        return res.json({ deleted: true, id: cleanVoiceId });
+      } catch (err: any) {
+        lastErr = err;
+      }
+    }
+    return res.status(lastErr?.status || 500).json({ error: lastErr?.message || 'تعذر حذف الصوت من الخادم السحابي' });
+  });
+
+  const voiceUploadSessions = new Map<string, {
+    createdAt: number;
+    sourceChunks: string[];
+    sourceTotal: number;
+    sourceMime: string;
+    consentChunks: string[];
+    consentTotal: number;
+    consentMime: string;
+  }>();
+
+  const pruneExpiredVoiceUploadSessions = () => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [sid, sess] of voiceUploadSessions.entries()) {
+      if (sess.createdAt < cutoff) {
+        voiceUploadSessions.delete(sid);
+      }
+    }
+  };
+
+  const withTimeout = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`انتهت مهلة الاتصال (${Math.round(ms / 1000)}ث) أثناء ${label}`)), ms);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  async function executeVoiceReplication(opts: {
+    sourceB64: string;
+    sourceMime: string;
+    consentB64: string;
+    consentMime: string;
+    displayName: string;
+    clientApiKey?: string;
+    storeMode?: boolean;
+    voiceModel?: string;
+  }): Promise<{ status: number; body: any }> {
+    const { sourceB64, sourceMime, consentB64, consentMime, displayName, clientApiKey } = opts;
+    const preferredStore = opts.storeMode !== false; // default true (1-year managed voice)
+    // Gemini Voices API requires gemini-3.8-flash-tts (or omitted) for voice creation;
+    // the created voice can then be synthesized with either gemini-3.8-flash-tts or gemini-3.8-flash-lite-tts.
+    const creationVoiceModel = 'gemini-3.8-flash-tts';
+    const synthesisVoiceModel = (opts.voiceModel === 'gemini-3.8-flash-lite-tts')
+      ? 'gemini-3.8-flash-lite-tts'
+      : 'gemini-3.8-flash-tts';
+
+    if (!sourceB64 || !consentB64 || sourceB64.length < 1300 || consentB64.length < 1300) {
+      return {
+        status: 400,
+        body: { error: "العينة الصوتية المسجلة قصيرة جداً أو فارغة. يرجى إعادة التسجيل بوضوح." }
+      };
+    }
+
+    const cleanDisplayName = displayName.trim() || "صوتي المستنسخ";
+    const pool = getActiveKeyPool(clientApiKey);
+    const keysToTry: (string | null)[] = [...pool];
+    if (!clientApiKey && !keysToTry.includes(null)) keysToTry.unshift(null);
+    if (clientApiKey && !keysToTry.includes(null)) keysToTry.push(null);
+
+    const triedKeys = new Set<string>();
+    let lastErr: any = null;
+    let lastStatus = 500;
+
+    for (const apiKey of keysToTry) {
+      const finalKey = apiKey !== null
+        ? apiKey
+        : (SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || process.env.AISTUDIO_API_KEY || process.env.GOOGLE_API_KEY || '');
+      if (!finalKey && apiKey !== null) continue;
+
+      const dedupTag = finalKey || '__INTERNAL_PROXY__';
+      if (triedKeys.has(dedupTag)) continue;
+      triedKeys.add(dedupTag);
+
+      const ai = new GoogleGenAI({
+        apiKey: finalKey,
+        httpOptions: {
+          apiVersion: 'v1beta',
+          headers: { 'User-Agent': 'aistudio-build' }
+        }
+      });
+
+      try {
+        let createdVoice: any;
+        let usedStoreMode = preferredStore;
+
+        try {
+          createdVoice = await withTimeout(
+            ai.voices.create({
+              store: preferredStore,
+              voice: {
+                model: creationVoiceModel,
+                type: "replicated",
+                display_name: cleanDisplayName,
+                replicated: {
+                  source_audio: { data: sourceB64, mime_type: sourceMime },
+                  consent_audio: { data: consentB64, mime_type: consentMime }
+                }
+              }
+            }),
+            30000,
+            'إنشاء بصمة الصوت عبر Gemini Voices API'
+          );
+        } catch (storedErr: any) {
+          const msg = String(storedErr?.message || storedErr || '').toLowerCase();
+          // If persistent stored voice quota (200 voices) is full, retry stateless client-managed key mode (voicekey_...)
+          if (preferredStore && (msg.includes('resource_exhausted') || msg.includes('maximum') || msg.includes('quota'))) {
+            console.warn('[Voice Replication] Stored voice limit reached, attempting stateless mode (store=false)...');
+            usedStoreMode = false;
+            createdVoice = await withTimeout(
+              ai.voices.create({
+                store: false,
+                voice: {
+                  model: creationVoiceModel,
+                  type: "replicated",
+                  display_name: cleanDisplayName,
+                  replicated: {
+                    source_audio: { data: sourceB64, mime_type: sourceMime },
+                    consent_audio: { data: consentB64, mime_type: consentMime }
+                  }
+                }
+              }),
+              30000,
+              'إنشاء مفتاح الصوت المستنسخ المؤقت'
+            );
+          } else {
+            throw storedErr;
+          }
+        }
+
+        const rawId = createdVoice?.id || createdVoice?.key || '';
+        const isStatelessKey = !usedStoreMode || (!createdVoice?.id && Boolean(createdVoice?.key));
+        if (!rawId) {
+          throw new Error('لم تُرجِع واجهة Gemini Voices API معرف صوت صالح (id أو key).');
+        }
+
+        console.log(`[Voice Replication] Real Gemini voice created successfully: ${rawId.slice(0, 18)}... (store=${usedStoreMode}, createModel=${creationVoiceModel}, synthModel=${synthesisVoiceModel})`);
+
+        // Synthesize a live verification clip using the newly replicated voice ID
+        let previewAudioBase64: string | null = null;
+        let previewWarning: string | null = null;
+        try {
+          const synthResponse = await withTimeout(
+            ai.models.generateContent({
+              model: synthesisVoiceModel,
+              contents: "مرحباً بك! تم استنساخ صوتي الحقيقي بنجاح عبر محرك جيميني.",
+              config: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    voice: rawId
+                  }
+                }
+              }
+            }),
+            20000,
+            'توليد عينة التحقق بالصوت المستنسخ'
+          );
+          previewAudioBase64 = synthResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+        } catch (synthErr: any) {
+          console.warn('[Voice Replication] Live preview synthesis warning:', synthErr?.message || synthErr);
+          previewWarning = synthErr?.message || 'تم إنشاء الصوت ولكن تعذر توليد المعاينة الفورية.';
+        }
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            voice_id: rawId,
+            id: createdVoice?.id || null,
+            key: createdVoice?.key || null,
+            store: usedStoreMode,
+            isStatelessKey,
+            expire_time: createdVoice?.expire_time || null,
+            display_name: createdVoice?.display_name || cleanDisplayName,
+            model: synthesisVoiceModel,
+            type: "replicated",
+            source: "gemini_voices_api",
+            previewAudioBase64,
+            previewWarning
+          }
+        };
+      } catch (err: any) {
+        lastErr = err;
+        const errMsg = String(err?.message || err || '');
+        const statusMatch = errMsg.match(/Status\s+(\d{3})/) || errMsg.match(/"code":\s*(\d{3})/);
+        const status = Number(err?.status || statusMatch?.[1] || 500);
+        lastStatus = status;
+
+        console.warn(`[Voice Replication API Error] status=${status}:`, errMsg.slice(0, 220));
+
+        // Do not retry with other keys if the audio/consent itself failed biometric validation (400)
+        if (status === 400 && !errMsg.includes('API_KEY_INVALID')) {
+          return {
+            status: 400,
+            body: {
+              error: formatVoiceReplicationError(errMsg, 400),
+              details: errMsg
+            }
+          };
+        }
+        if (status === 429 && apiKey) {
+          markKeyExhausted(apiKey);
+        }
+      }
+    }
+
+    const rawMsg = String(lastErr?.message || lastErr || '');
+    const httpCode = (lastStatus >= 400 && lastStatus < 600) ? lastStatus : 502;
+    return {
+      status: httpCode,
+      body: {
+        error: formatVoiceReplicationError(rawMsg, lastStatus),
+        details: rawMsg
+      }
+    };
+  }
+
+  app.post("/api/voices/upload-chunk", (req, res) => {
+    try {
+      pruneExpiredVoiceUploadSessions();
+      const { sessionId, field, chunkIndex, totalChunks, mimeType, data } = req.body || {};
+      if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 100) {
+        return res.status(400).json({ error: 'معرف جلسة الرفع غير صالح.' });
+      }
+      if (field !== 'source_audio' && field !== 'consent_audio') {
+        return res.status(400).json({ error: 'نوع العينة الصوتية غير صالح.' });
+      }
+      if (!Number.isInteger(chunkIndex) || !Number.isInteger(totalChunks) || chunkIndex < 0 || totalChunks < 1 || totalChunks > 250 || chunkIndex >= totalChunks) {
+        return res.status(400).json({ error: 'ترتيب الجزء الصوتي غير صالح.' });
+      }
+      if (typeof data !== 'string' || data.length === 0) {
+        return res.status(400).json({ error: 'بيانات الجزء الصوتي فارغة.' });
+      }
+
+      let sess = voiceUploadSessions.get(sessionId);
+      if (!sess) {
+        sess = {
+          createdAt: Date.now(),
+          sourceChunks: [],
+          sourceTotal: 0,
+          sourceMime: 'audio/wav',
+          consentChunks: [],
+          consentTotal: 0,
+          consentMime: 'audio/wav'
+        };
+        voiceUploadSessions.set(sessionId, sess);
+      }
+
+      if (field === 'source_audio') {
+        sess.sourceTotal = totalChunks;
+        sess.sourceMime = normalizeAudioMime(mimeType);
+        sess.sourceChunks[chunkIndex] = data;
+      } else {
+        sess.consentTotal = totalChunks;
+        sess.consentMime = normalizeAudioMime(mimeType);
+        sess.consentChunks[chunkIndex] = data;
+      }
+
+      return res.json({ ok: true, sessionId, field, chunkIndex, totalChunks });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || 'فشل استقبال جزء الصوت' });
+    }
+  });
+
+  app.post("/api/voices/replicate-session", async (req, res) => {
+    try {
+      const { sessionId, display_name, apiKey: rawKey, store, model } = req.body || {};
+      if (!sessionId || typeof sessionId !== 'string') {
+        return res.status(400).json({ error: 'معرف جلسة الاستنساخ مفقود.' });
+      }
+      const sess = voiceUploadSessions.get(sessionId);
+      if (!sess) {
+        return res.status(404).json({ error: 'انتهت صلاحية جلسة الرفع أو أُعيد تشغيل الخادم. يرجى إعادة المحاولة.' });
+      }
+      voiceUploadSessions.delete(sessionId);
+
+      if (sess.sourceTotal < 1 || sess.consentTotal < 1) {
+        return res.status(400).json({ error: 'عينة الصوت المرجعية وعينة الموافقة اللفظية الصريحة مطلوبتان لإكمال الاستنساخ.' });
+      }
+      for (let i = 0; i < sess.sourceTotal; i++) {
+        if (!sess.sourceChunks[i]) {
+          return res.status(400).json({ error: `الجزء رقم ${i + 1} من العينة المرجعية مفقود. يرجى المحاولة مجدداً.` });
+        }
+      }
+      for (let i = 0; i < sess.consentTotal; i++) {
+        if (!sess.consentChunks[i]) {
+          return res.status(400).json({ error: `الجزء رقم ${i + 1} من عينة الموافقة مفقود. يرجى المحاولة مجدداً.` });
+        }
+      }
+
+      const clientApiKey = (rawKey && typeof rawKey === 'string' && rawKey.trim() !== '' && rawKey !== 'undefined')
+        ? rawKey.trim()
+        : undefined;
+
+      const result = await executeVoiceReplication({
+        sourceB64: sess.sourceChunks.join(''),
+        sourceMime: sess.sourceMime,
+        consentB64: sess.consentChunks.join(''),
+        consentMime: sess.consentMime,
+        displayName: typeof display_name === 'string' ? display_name : 'صوتي المستنسخ',
+        clientApiKey,
+        storeMode: store !== false && store !== 'false',
+        voiceModel: typeof model === 'string' ? model : undefined
+      });
+      return res.status(result.status).json(result.body);
+    } catch (e: any) {
+      console.error("[Voice Replication Session Error]:", e);
+      return res.status(500).json({
+        error: formatVoiceReplicationError(e?.message || 'خطأ غير متوقع في الخادم أثناء استنساخ الصوت.', 500)
+      });
+    }
+  });
+
   app.post("/api/voices/replicate", (req, res, next) => {
+    const ct = (req.headers['content-type'] || '').toLowerCase();
+    if (ct.includes('application/json')) {
+      return next();
+    }
     upload.fields([{ name: 'source_audio' }, { name: 'consent_audio' }])(req, res, (err) => {
       if (err) {
         console.warn('[Voice Replication Upload Error]', err);
-        return res.status(200).json({
-          success: true,
-          voice_id: `voice_custom_${Date.now()}`,
-          display_name: req.body?.display_name || "صوتي المستنسخ",
-          model: "gemini-3.8-flash-tts",
-          type: "replicated"
-        });
+        return res.status(400).json({ error: `خطأ في رفع الملفات الصوتية: ${err.message}` });
       }
       next();
     });
   }, async (req, res) => {
     try {
-      const { apiKey: rawKey, display_name } = req.body || {};
-      const clientApiKey = (rawKey && typeof rawKey === 'string' && rawKey.trim() !== '') ? rawKey.trim() : undefined;
-      const finalKey = clientApiKey || SYSTEM_KEYS[0] || process.env.GEMINI_API_KEY || '';
+      const { apiKey: rawKey, display_name, store, model, source_audio_base64, consent_audio_base64, source_mime_type, consent_mime_type } = req.body || {};
+      const clientApiKey = (rawKey && typeof rawKey === 'string' && rawKey.trim() !== '' && rawKey !== 'undefined')
+        ? rawKey.trim()
+        : undefined;
 
-      const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-      if (!files?.source_audio?.[0] || !files?.consent_audio?.[0]) {
-        return res.status(400).json({ error: "عينة الصوت وعينة الموافقة مطلوبة لإكمال الاستنساخ" });
-      }
+      let sourceB64 = typeof source_audio_base64 === 'string' ? source_audio_base64 : '';
+      let consentB64 = typeof consent_audio_base64 === 'string' ? consent_audio_base64 : '';
+      let sourceMime = normalizeAudioMime(source_mime_type);
+      let consentMime = normalizeAudioMime(consent_mime_type);
 
-      try {
-        const response = await fetch('https://generativelanguage.googleapis.com/v1beta/voices', {
-          method: 'POST',
-          headers: { 
-              'Content-Type': 'application/json',
-              'x-goog-api-key': finalKey || 'key' 
-          },
-          body: JSON.stringify({
-            store: true,
-            voice: {
-              model: "gemini-3.8-flash-tts",
-              type: "replicated",
-              display_name: display_name || "Replicated Voice",
-              replicated: {
-                source_audio: files.source_audio[0].buffer.toString('base64'),
-                consent_audio: files.consent_audio[0].buffer.toString('base64')
-              }
-            }
-          })
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.warn("[Voice Replication API] Upstream status:", response.status, errorText);
-          const generatedVoiceId = `voice_custom_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          return res.json({
-            success: true,
-            name: `voices/${generatedVoiceId}`,
-            voice_id: generatedVoiceId,
-            display_name: display_name || "صوتي المستنسخ",
-            model: "gemini-3.8-flash-tts",
-            type: "replicated",
-            source: "verified_profile"
-          });
+      if (!sourceB64 || !consentB64) {
+        const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+        const sourceFile = files?.source_audio?.[0];
+        const consentFile = files?.consent_audio?.[0];
+        if (!sourceFile || !consentFile) {
+          return res.status(400).json({ error: "عينة الصوت المرجعية وعينة الموافقة اللفظية الصريحة مطلوبتان لإكمال الاستنساخ." });
         }
-
-        const data = await response.json();
-        return res.json({
-          ...data,
-          success: true,
-          voice_id: data.name || data.voice_id || `voice_${Date.now()}`,
-          display_name: display_name || "صوتي المستنسخ"
-        });
-      } catch (apiErr: any) {
-        console.warn('[Voice Replication API Call Exception - Activating Verified Profile]', apiErr?.message);
-        const generatedVoiceId = `voice_custom_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        return res.json({
-          success: true,
-          name: `voices/${generatedVoiceId}`,
-          voice_id: generatedVoiceId,
-          display_name: display_name || "صوتي المستنسخ",
-          model: "gemini-3.8-flash-tts",
-          type: "replicated",
-          source: "verified_profile"
-        });
+        if (sourceFile.buffer.length < 1000 || consentFile.buffer.length < 1000) {
+          return res.status(400).json({ error: "العينة الصوتية المسجلة قصيرة جداً أو فارغة. يرجى إعادة التسجيل بوضوح." });
+        }
+        sourceMime = normalizeAudioMime(sourceFile.mimetype);
+        consentMime = normalizeAudioMime(consentFile.mimetype);
+        sourceB64 = sourceFile.buffer.toString('base64');
+        consentB64 = consentFile.buffer.toString('base64');
       }
+
+      const result = await executeVoiceReplication({
+        sourceB64,
+        sourceMime,
+        consentB64,
+        consentMime,
+        displayName: typeof display_name === 'string' ? display_name : 'صوتي المستنسخ',
+        clientApiKey,
+        storeMode: store !== false && store !== 'false',
+        voiceModel: typeof model === 'string' ? model : undefined
+      });
+      return res.status(result.status).json(result.body);
     } catch (e: any) {
-      console.error("[Voice Replication System Handler Error]:", e);
-      const generatedVoiceId = `voice_custom_${Date.now()}`;
-      return res.json({
-        success: true,
-        voice_id: generatedVoiceId,
-        display_name: req.body?.display_name || "صوتي المستنسخ",
-        type: "replicated"
+      console.error("[Voice Replication System Error]:", e);
+      return res.status(500).json({
+        error: formatVoiceReplicationError(e?.message || 'خطأ غير متوقع في الخادم أثناء استنساخ الصوت.', 500)
       });
     }
   });
@@ -1437,7 +1843,9 @@ async function startServer() {
               config: {
                 responseModalities: [Modality.AUDIO],
                 speechConfig: {
-                  voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
+                  voiceConfig: (voice.startsWith('voice_') || voice.startsWith('voicekey_'))
+                    ? { voice }
+                    : { prebuiltVoiceConfig: { voiceName: ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'].includes(voice) ? voice : 'Aoede' } },
                 },
                 systemInstruction: systemInstruction,
                 outputAudioTranscription: {},

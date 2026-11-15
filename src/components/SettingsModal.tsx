@@ -9,6 +9,12 @@ import ConfirmModal from './ConfirmModal';
 import { useToast } from './Toast';
 import { base64ToWavBlob, clearAudioCacheFromStorage } from '../utils/audio';
 import { safeStorage } from '../utils/storage';
+import {
+  buildSpeechVoiceConfig,
+  getClonedVoiceId,
+  saveClonedVoice,
+  removeClonedVoice
+} from '../utils/clonedVoices';
 
 const AVAILABLE_FONTS = [
   {
@@ -161,13 +167,20 @@ export default function SettingsModal({
   const [voiceDisplayName, setVoiceDisplayName] = useState('');
   const [sourceAudioFile, setSourceAudioFile] = useState<File | null>(null);
   const [consentAudioFile, setConsentAudioFile] = useState<File | null>(null);
+  const [consentLang, setConsentLang] = useState<'ar' | 'en'>('ar');
+  const [cloneStoreMode, setCloneStoreMode] = useState<boolean>(true);
+  const [cloneVoiceModel, setCloneVoiceModel] = useState<'gemini-3.8-flash-tts' | 'gemini-3.8-flash-lite-tts'>('gemini-3.8-flash-tts');
   const [isCloning, setIsCloning] = useState(false);
   const [cloningStep, setCloningStep] = useState<number>(0);
   const [cloningStatusText, setCloningStatusText] = useState('');
   const [clonedSuccessData, setClonedSuccessData] = useState<{
     voiceId: string;
     displayName: string;
+    isStatelessKey?: boolean;
+    expireTime?: string | null;
+    model?: string;
     testAudioUrl?: string;
+    previewWarning?: string;
   } | null>(null);
   const [cloningError, setCloningError] = useState<string | null>(null);
   const [isPlayingTestVoice, setIsPlayingTestVoice] = useState(false);
@@ -219,23 +232,25 @@ export default function SettingsModal({
     setPreviewingVoice(null);
 
     try {
+      const clonedId = getClonedVoiceId(v);
+      if (isCustom && !clonedId) {
+        toast({
+          type: 'error',
+          title: 'صوت غير مرتبط بمعرف Gemini حقيقي',
+          message: `الصوت "${v}" تم حفظه بدون معرف استنساخ حقيقي. يرجى حذفه وإعادة الاستنساخ لتوليد صوتك الفعلي.`
+        });
+        setIsLoadingPreview(null);
+        return;
+      }
+
       const sampleText = isCustom
-        ? `مرحباً بك! هذه عينة استماع حية لتجربة صوتك المستنسخ ${v}.`
+        ? `مرحباً بك! هذه عينة حية ناطقة بصوتك المستنسخ الفعلي من محرك جيميني.`
         : `أهلاً بك، أنا الصوت المسمى ${v}، ويسعدني التحدث معك عبر نظام مايند ميرور الذكي.`;
 
-      const geminiAllowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'];
-      let voiceName = 'Puck';
-      const foundVoice = geminiAllowedVoices.find(name => name.toLowerCase() === v.toLowerCase());
-      if (foundVoice) {
-        voiceName = foundVoice;
-      } else {
-        let hash = 0;
-        for (let i = 0; i < v.length; i++) {
-          hash = v.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        const index = Math.abs(hash) % geminiAllowedVoices.length;
-        voiceName = geminiAllowedVoices[index];
-      }
+      const voiceConfigPayload = buildSpeechVoiceConfig(v);
+      const targetAudioModel = clonedId
+        ? ((audioModel === 'gemini-3.8-flash-tts' || audioModel === 'gemini-3.8-flash-lite-tts') ? audioModel : 'gemini-3.8-flash-tts')
+        : (audioModel || 'gemini-3.8-flash-tts');
 
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -243,14 +258,13 @@ export default function SettingsModal({
         body: JSON.stringify({
           apiKey: apiKey || '',
           params: {
-            model: audioModel || 'gemini-3.8-flash-tts',
+            model: targetAudioModel,
+            strictModel: Boolean(clonedId),
             contents: sampleText,
             config: {
               responseModalities: ["AUDIO"],
               speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: { voiceName }
-                }
+                voiceConfig: voiceConfigPayload
               }
             }
           }
@@ -277,10 +291,32 @@ export default function SettingsModal({
               }
             };
           }
+        } else {
+          toast({
+            type: 'error',
+            title: 'تعذر توليد العينة الصوتية',
+            message: 'لم يرجع المحرك بيانات صوتية صالحة لهذا الصوت.'
+          });
         }
+      } else {
+        const errText = await res.text().catch(() => '');
+        let parsedErr = errText;
+        try {
+          parsedErr = JSON.parse(errText)?.error || errText;
+        } catch {}
+        toast({
+          type: 'error',
+          title: 'تعذر تشغيل المعاينة',
+          message: parsedErr || `فشل طلب المعاينة (${res.status})`
+        });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error generating Gemini voice preview:', err);
+      toast({
+        type: 'error',
+        title: 'خطأ في المعاينة الصوتية',
+        message: err?.message || 'حدث خطأ غير متوقع أثناء توليد العينة.'
+      });
     } finally {
       setIsLoadingPreview(null);
     }
@@ -991,35 +1027,47 @@ export default function SettingsModal({
                           </div>
                           <div>
                             <h4 className="text-xs font-bold text-emerald-300">تم استنساخ الصوت واعتماده بنجاح! 🎉</h4>
-                            <span className="text-[10px] text-muted font-mono">
+                            <span className="text-[10px] text-muted font-mono block">
                               معرف الصوت: {clonedSuccessData.voiceId}
+                            </span>
+                            <span className="text-[9px] text-emerald-300/80 block mt-0.5">
+                              {clonedSuccessData.isStatelessKey
+                                ? 'وضع مؤقت (store=false) — مفتاح voicekey صالح 7 أيام دون حفظ على الخادم'
+                                : 'تخزين سحابي دائم (store=true) — محفوظ بمشروعك لمدة سنة وتُمدد مع الاستخدام'}
+                              {clonedSuccessData.expireTime ? ` • ينتهي: ${new Date(clonedSuccessData.expireTime).toLocaleDateString('ar')}` : ''}
                             </span>
                           </div>
                         </div>
-                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
+                        <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold shrink-0">
                           {clonedSuccessData.displayName}
                         </span>
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 pt-1">
-                        {/* Test Cloned Voice Playback */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (testVoiceAudioRef.current) {
-                              if (isPlayingTestVoice) {
-                                testVoiceAudioRef.current.pause();
-                                setIsPlayingTestVoice(false);
-                              } else {
-                                testVoiceAudioRef.current.play().then(() => setIsPlayingTestVoice(true)).catch(() => {});
+                        {/* Test Cloned Voice Playback (Real Synthesized Output) */}
+                        {clonedSuccessData.testAudioUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (testVoiceAudioRef.current) {
+                                if (isPlayingTestVoice) {
+                                  testVoiceAudioRef.current.pause();
+                                  setIsPlayingTestVoice(false);
+                                } else {
+                                  testVoiceAudioRef.current.play().then(() => setIsPlayingTestVoice(true)).catch(() => {});
+                                }
                               }
-                            }
-                          }}
-                          className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-bg text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer shadow transition-all"
-                        >
-                          {isPlayingTestVoice ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
-                          <span>{isPlayingTestVoice ? 'إيقاف التجربة' : 'استمع لتجربة الصوت المستنسخ 🔊'}</span>
-                        </button>
+                            }}
+                            className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-bg text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer shadow transition-all"
+                          >
+                            {isPlayingTestVoice ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}
+                            <span>{isPlayingTestVoice ? 'إيقاف التجربة' : 'استمع لصوتك المستنسخ المولّد من Gemini 🔊'}</span>
+                          </button>
+                        ) : (
+                          <div className="flex-1 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+                            {clonedSuccessData.previewWarning || 'تم اعتماد المعرف في جيميني؛ يمكنك تجربته مباشرة من مكتبة الأصوات بالأسفل.'}
+                          </div>
+                        )}
 
                         <button
                           type="button"
@@ -1052,7 +1100,7 @@ export default function SettingsModal({
                       <AlertTriangle size={16} className="shrink-0 text-red-400" />
                       <div className="space-y-0.5">
                         <span className="font-bold block">تعذر إكمال الاستنساخ:</span>
-                        <span className="text-[11px] text-red-300/90">{cloningError}</span>
+                        <span className="text-[11px] text-red-300/90 leading-relaxed block">{cloningError}</span>
                       </div>
                     </div>
                   )}
@@ -1060,26 +1108,10 @@ export default function SettingsModal({
                   {/* Input Fields & Recorders (when not succeeded yet) */}
                   {!clonedSuccessData && (
                     <div className="space-y-3.5">
-                      {/* 1. Voice Name Input */}
-                      <div className="space-y-1">
-                        <label className="text-xs font-bold text-text flex items-center gap-1.5">
-                          <span>اسم الصوت المخصص:</span>
-                          <span className="text-red-400">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="مثال: صوتي الشخصي 2026، صوت المعلق الخاص، د. أحمد..."
-                          value={voiceDisplayName}
-                          onChange={(e) => setVoiceDisplayName(e.target.value)}
-                          disabled={isCloning}
-                          className="w-full bg-surface border border-border rounded-xl p-2.5 text-xs text-text placeholder:text-muted/60 outline-none focus:border-accent transition-colors"
-                        />
-                      </div>
-
-                      {/* 2. Source Audio Recorder */}
+                      {/* 1. Source Audio Recorder */}
                       <VoiceSampleRecorder
-                        label="عينة الصوت المرجعية (10 إلى 30 ثانية)"
-                        sublabel="تحدث بطريقتك المعتادة وبنبرتك الطبيعية في موضوع من اختيارك ليتمكن النموذج من التقاط خصائص وطبقات حبالك الصوتية."
+                        label="1. عينة الصوت المرجعية (10 إلى 30 ثانية)"
+                        sublabel="تحدث بطريقتك المعتادة وبنبرتك الطبيعية في بيئة هادئة ليتمكن النموذج من التقاط خصائص وطبقات حبالك الصوتية."
                         maxDurationSeconds={30}
                         minDurationSeconds={10}
                         file={sourceAudioFile}
@@ -1087,11 +1119,40 @@ export default function SettingsModal({
                         type="source"
                       />
 
-                      {/* 3. Consent Audio Recorder with Teleprompter Statement */}
+                      {/* Consent Language Switcher */}
+                      <div className="flex items-center justify-between gap-2 bg-surface p-2.5 rounded-xl border border-border/60">
+                        <span className="text-[11px] font-bold text-text">لغة نص الإقرار الإلزامي (للمطابقة عبر Google):</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setConsentLang('ar')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors ${
+                              consentLang === 'ar' ? 'bg-accent text-bg' : 'bg-surface2 text-muted hover:text-text'
+                            }`}
+                          >
+                            العربية (MSA)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConsentLang('en')}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition-colors ${
+                              consentLang === 'en' ? 'bg-accent text-bg' : 'bg-surface2 text-muted hover:text-text'
+                            }`}
+                          >
+                            English
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 2. Consent Audio Recorder with Official Gemini Teleprompter Statement */}
                       <VoiceSampleRecorder
-                        label="عينة الموافقة اللفظية الصريحة (Consent Statement)"
-                        sublabel="سجل صوتك وأنت تقرأ العبارة القانونية الإلزامية بوضوح تام، وذلك للمطابقة البيومترية واعتماد الصوت رسمياً."
-                        statementToRead="أنا صاحب هذا الصوت وأوافق على استخدام هذا الصوت لإنشاء نموذج صوت اصطناعي."
+                        label="2. عينة الموافقة اللفظية الصريحة (Consent Statement)"
+                        sublabel="اقرأ النص الظاهر في الصندوق حرفياً وبوضوح تام باستخدام نفس الميكروفون، لأن Gemini يتحقق آلياً من الصيغة وتطابق المتحدث."
+                        statementToRead={
+                          consentLang === 'en'
+                            ? 'I am the owner of this voice and I consent to Google using this voice to create a synthetic voice model.'
+                            : 'أنا مالك هذا الصوت وأوافق على أن تستخدم Google هذا الصوت لإنشاء نموذج صوتي اصطناعي.'
+                        }
                         maxDurationSeconds={20}
                         minDurationSeconds={5}
                         file={consentAudioFile}
@@ -1099,134 +1160,314 @@ export default function SettingsModal({
                         type="consent"
                       />
 
+                      {/* 3. Voice Name & Storage/Model Options placed right above the Action Button */}
+                      <div className="space-y-2.5 bg-surface p-3 rounded-xl border border-border/70">
+                        <label className="text-xs font-bold text-text flex items-center justify-between gap-1.5">
+                          <span>3. اسم الصوت وخيارات الاعتماد (اختياري):</span>
+                          <span className="text-[10px] text-muted font-normal">سيُسمّى تلقائياً إذا تُرك فارغاً</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="مثال: صوتي الشخصي، صوت المعلق الخاص، د. أحمد..."
+                          value={voiceDisplayName}
+                          onChange={(e) => setVoiceDisplayName(e.target.value)}
+                          disabled={isCloning}
+                          className="w-full bg-surface2 border border-border rounded-xl p-2.5 text-xs text-text placeholder:text-muted/60 outline-none focus:border-accent transition-colors"
+                        />
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+                          <div className="bg-surface2/70 rounded-lg p-2 border border-border/60 space-y-1">
+                            <span className="text-[10px] font-bold text-muted block">وضع التخزين (Storage Mode):</span>
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                disabled={isCloning}
+                                onClick={() => setCloneStoreMode(true)}
+                                className={`flex-1 py-1 px-2 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                                  cloneStoreMode ? 'bg-accent text-bg' : 'bg-surface text-muted hover:text-text'
+                                }`}
+                              >
+                                دائم (سنة • 200 صوت)
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isCloning}
+                                onClick={() => setCloneStoreMode(false)}
+                                className={`flex-1 py-1 px-2 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                                  !cloneStoreMode ? 'bg-accent2 text-bg' : 'bg-surface text-muted hover:text-text'
+                                }`}
+                              >
+                                مؤقت (voicekey • 7 أيام)
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="bg-surface2/70 rounded-lg p-2 border border-border/60 space-y-1">
+                            <span className="text-[10px] font-bold text-muted block">نموذج تجربة النطق (TTS):</span>
+                            <div className="flex gap-1" dir="ltr">
+                              <button
+                                type="button"
+                                disabled={isCloning}
+                                onClick={() => setCloneVoiceModel('gemini-3.8-flash-tts')}
+                                className={`flex-1 py-1 px-1.5 rounded text-[9px] font-mono font-bold cursor-pointer transition-colors ${
+                                  cloneVoiceModel === 'gemini-3.8-flash-tts' ? 'bg-accent text-bg' : 'bg-surface text-muted hover:text-text'
+                                }`}
+                              >
+                                3.8-flash-tts
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isCloning}
+                                onClick={() => setCloneVoiceModel('gemini-3.8-flash-lite-tts')}
+                                className={`flex-1 py-1 px-1.5 rounded text-[9px] font-mono font-bold cursor-pointer transition-colors ${
+                                  cloneVoiceModel === 'gemini-3.8-flash-lite-tts' ? 'bg-accent text-bg' : 'bg-surface text-muted hover:text-text'
+                                }`}
+                              >
+                                3.8-flash-lite-tts
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Live Readiness Checklist */}
+                        <div className="flex flex-wrap items-center gap-2 pt-1 text-[10px]">
+                          <span className={`px-2 py-0.5 rounded-md border font-bold ${sourceAudioFile ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400' : 'bg-surface2 border-border text-muted'}`}>
+                            {sourceAudioFile ? '✓ عينة الصوت جاهزة' : '○ سجّل عينة الصوت (1)'}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-md border font-bold ${consentAudioFile ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400' : 'bg-surface2 border-border text-muted'}`}>
+                            {consentAudioFile ? '✓ عينة الموافقة جاهزة' : '○ سجّل عينة الموافقة (2)'}
+                          </span>
+                        </div>
+                      </div>
+
                       {/* 4. Multi-step Progress UI during active cloning */}
                       {isCloning && (
                         <div className="bg-surface border border-accent/30 rounded-xl p-3.5 space-y-3 animate-fadeIn">
                           <div className="flex items-center gap-2 text-xs font-bold text-accent">
                             <Loader2 size={15} className="animate-spin" />
-                            <span>{cloningStatusText || 'جارِ معالجة وتدريب نموذج الصوت...'}</span>
+                            <span>{cloningStatusText || 'جارِ معالجة وتدريب نموذج الصوت عبر Gemini...'}</span>
                           </div>
 
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px]">
                             <div className={`p-2 rounded-lg border text-center transition-all ${cloningStep >= 1 ? 'bg-accent/20 border-accent text-accent font-bold' : 'bg-surface2/50 border-border/40 text-muted'}`}>
-                              1. فحص الترددات
+                              1. تجهيز WAV 24kHz
                             </div>
                             <div className={`p-2 rounded-lg border text-center transition-all ${cloningStep >= 2 ? 'bg-accent/20 border-accent text-accent font-bold' : 'bg-surface2/50 border-border/40 text-muted'}`}>
-                              2. مطابقة الإقرار
+                              2. التحقق البيومتري
                             </div>
                             <div className={`p-2 rounded-lg border text-center transition-all ${cloningStep >= 3 ? 'bg-accent/20 border-accent text-accent font-bold' : 'bg-surface2/50 border-border/40 text-muted'}`}>
-                              3. تدريب Gemini TTS
+                              3. إنشاء Voice ID
                             </div>
                             <div className={`p-2 rounded-lg border text-center transition-all ${cloningStep >= 4 ? 'bg-emerald-500/20 border-emerald-500 text-emerald-400 font-bold' : 'bg-surface2/50 border-border/40 text-muted'}`}>
-                              4. اعتماد الصوت
+                              4. تجربة النطق الحي
                             </div>
                           </div>
                         </div>
                       )}
 
-                      {/* 5. Start Replication Action Button */}
+                      {/* 5. Start Replication Action Button — Active as soon as BOTH recordings are ready */}
                       <button
                         type="button"
-                        disabled={isCloning || !voiceDisplayName.trim() || !sourceAudioFile || !consentAudioFile}
+                        disabled={isCloning || !sourceAudioFile || !consentAudioFile}
                         onClick={async () => {
-                          if (!voiceDisplayName.trim()) {
-                            setCloningError('يرجى كتابة اسم مناسب للصوت أولاً.');
-                            return;
-                          }
                           if (!sourceAudioFile) {
-                            setCloningError('يرجى تسجيل أو رفع عينة الصوت المرجعية.');
+                            setCloningError('يرجى تسجيل أو رفع عينة الصوت المرجعية (1).');
                             return;
                           }
                           if (!consentAudioFile) {
-                            setCloningError('يرجى تسجيل أو رفع عينة الموافقة اللفظية الصريحة.');
+                            setCloningError('يرجى تسجيل أو رفع عينة الموافقة اللفظية الصريحة (2).');
                             return;
                           }
+
+                          const resolvedDisplayName =
+                            voiceDisplayName.trim() ||
+                            `صوتي المستنسخ ${new Date().toLocaleTimeString('en-US', {
+                              hour12: false,
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })}`;
 
                           setIsCloning(true);
                           setCloningError(null);
                           setCloningStep(1);
-                          setCloningStatusText('تحليل الترددات الصوتية واستخراج بصمة الحبال الصوتية...');
+                          setCloningStatusText('تجهيز عينتي الصوت والموافقة للرفع الآمن...');
 
-                          try {
-                            // Step 1: Acoustic analysis simulated delay
-                            await new Promise(r => setTimeout(r, 900));
-                            setCloningStep(2);
-                            setCloningStatusText('مطابقة البصمة الحيوية مع إقرار الموافقة الصوتي...');
-
-                            const formData = new FormData();
-                            formData.append('display_name', voiceDisplayName.trim());
-                            formData.append('source_audio', sourceAudioFile);
-                            formData.append('consent_audio', consentAudioFile);
-                            if (apiKey && apiKey.trim()) {
-                              formData.append('apiKey', apiKey.trim());
+                          const fileToBase64 = async (file: File): Promise<string> => {
+                            const buf = await file.arrayBuffer();
+                            const bytes = new Uint8Array(buf);
+                            const chunkSize = 0x8000;
+                            const parts: string[] = [];
+                            for (let i = 0; i < bytes.length; i += chunkSize) {
+                              parts.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
                             }
+                            return btoa(parts.join(''));
+                          };
 
-                            // Step 2 -> 3
-                            await new Promise(r => setTimeout(r, 900));
-                            setCloningStep(3);
-                            setCloningStatusText('بناء نموذج الصوت المستنسخ عبر محرك Gemini 3.8 Flash TTS...');
+                          const postJsonWithRetry = async (url: string, payload: any, maxRetries = 2): Promise<Response> => {
+                            let lastNetworkErr: any = null;
+                            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                              try {
+                                return await fetch(url, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  credentials: 'same-origin',
+                                  body: JSON.stringify(payload)
+                                });
+                              } catch (netErr: any) {
+                                lastNetworkErr = netErr;
+                                if (attempt < maxRetries) {
+                                  await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+                                }
+                              }
+                            }
+                            throw lastNetworkErr;
+                          };
 
-                            const res = await fetch('/api/voices/replicate', {
-                              method: 'POST',
-                              body: formData
-                            });
-
-                            let data: any = {};
+                          const parseResponseSafely = async (res: Response): Promise<any> => {
                             const contentType = res.headers.get('content-type') || '';
                             if (contentType.includes('application/json')) {
-                              data = await res.json();
-                            } else {
-                              const rawText = await res.text();
-                              console.warn('[Voice Replication] Server returned non-JSON contentType:', contentType, rawText);
-                              throw new Error(`استجابة غير متوقعة من الخادم (${res.status})`);
+                              return await res.json();
                             }
-                            if (!res.ok || data.error) {
-                              throw new Error(data.error || `فشل استنساخ الصوت (${res.status})`);
+                            const rawText = await res.text();
+                            console.warn('[Voice Replication] Server returned non-JSON:', res.status, contentType, rawText.slice(0, 200));
+                            throw new Error(`استجابة غير متوقعة من الخادم (${res.status})`);
+                          };
+
+                          try {
+                            const [sourceB64, consentB64] = await Promise.all([
+                              fileToBase64(sourceAudioFile),
+                              fileToBase64(consentAudioFile)
+                            ]);
+
+                            const sessionId = `vrep_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+                            const B64_CHUNK_LEN = 280000; // ~280KB JSON payload per request (safe for all proxies)
+
+                            const uploadFieldInChunks = async (
+                              field: 'source_audio' | 'consent_audio',
+                              b64Data: string,
+                              mimeType: string,
+                              labelAr: string
+                            ) => {
+                              const totalChunks = Math.max(1, Math.ceil(b64Data.length / B64_CHUNK_LEN));
+                              for (let idx = 0; idx < totalChunks; idx++) {
+                                setCloningStatusText(`رفع ${labelAr} (${idx + 1}/${totalChunks})...`);
+                                const slice = b64Data.slice(idx * B64_CHUNK_LEN, (idx + 1) * B64_CHUNK_LEN);
+                                const chunkRes = await postJsonWithRetry('/api/voices/upload-chunk', {
+                                  sessionId,
+                                  field,
+                                  chunkIndex: idx,
+                                  totalChunks,
+                                  mimeType: mimeType || 'audio/wav',
+                                  data: slice
+                                });
+                                const chunkData = await parseResponseSafely(chunkRes);
+                                if (!chunkRes.ok || chunkData.error) {
+                                  throw new Error(chunkData.error || `فشل رفع جزء ${idx + 1} من ${labelAr} (${chunkRes.status})`);
+                                }
+                              }
+                            };
+
+                            setCloningStep(2);
+                            await uploadFieldInChunks('source_audio', sourceB64, sourceAudioFile.type, 'العينة المرجعية');
+                            await uploadFieldInChunks('consent_audio', consentB64, consentAudioFile.type, 'عينة الموافقة');
+
+                            setCloningStep(3);
+                            setCloningStatusText(`التحقق البيومتري وبناء المعرّف السحابي عبر ${cloneVoiceModel}...`);
+
+                            const res = await postJsonWithRetry('/api/voices/replicate-session', {
+                              sessionId,
+                              display_name: resolvedDisplayName,
+                              store: cloneStoreMode,
+                              model: cloneVoiceModel,
+                              apiKey: apiKey && apiKey.trim() ? apiKey.trim() : undefined
+                            }, 1);
+
+                            const data = await parseResponseSafely(res);
+                            if (!res.ok || data.error || !data.voice_id) {
+                              throw new Error(data.error || `فشل استنساخ الصوت الحقيقي (${res.status})`);
                             }
 
-                            // Step 4: Finished and Activated
                             setCloningStep(4);
-                            setCloningStatusText('تم اعتماد الصوت وإضافته إلى قائمة الأصوات الرسمية بنجاح!');
-                            await new Promise(r => setTimeout(r, 600));
+                            setCloningStatusText('تم إنشاء الصوت الحقيقي! جارٍ تجهيز عينة النطق الفعلية...');
 
-                            const voiceName = voiceDisplayName.trim();
-                            
-                            // Add to dynamic voices
-                            if (onVoiceAdded) {
-                              onVoiceAdded(voiceName);
-                            }
-
-                            // Create test preview audio URL from source sample (revoking previous)
-                            if (clonedTestObjectUrlRef.current) {
-                              URL.revokeObjectURL(clonedTestObjectUrlRef.current);
-                            }
-                            const previewAudioUrl = URL.createObjectURL(sourceAudioFile);
-                            clonedTestObjectUrlRef.current = previewAudioUrl;
-
-                            setClonedSuccessData({
-                              voiceId: data.voice_id || data.name || `voice_${Date.now()}`,
-                              displayName: voiceName,
-                              testAudioUrl: previewAudioUrl
+                            const finalVoiceName = (data.display_name || resolvedDisplayName).trim();
+                            saveClonedVoice({
+                              displayName: finalVoiceName,
+                              voiceId: data.voice_id,
+                              type: 'replicated',
+                              model: data.model || cloneVoiceModel,
+                              isStatelessKey: Boolean(data.isStatelessKey),
+                              expireTime: data.expire_time || null,
+                              createdAt: Date.now()
                             });
 
+                            if (onVoiceAdded) {
+                              onVoiceAdded(finalVoiceName);
+                            }
+
+                            // Build preview Audio URL strictly from Gemini's synthesized WAV (NEVER raw source mic file)
+                            let synthesizedPreviewUrl: string | undefined;
+                            if (clonedTestObjectUrlRef.current) {
+                              URL.revokeObjectURL(clonedTestObjectUrlRef.current);
+                              clonedTestObjectUrlRef.current = null;
+                            }
+                            if (data.previewAudioBase64) {
+                              const wavBlob = base64ToWavBlob([data.previewAudioBase64]);
+                              if (wavBlob) {
+                                synthesizedPreviewUrl = URL.createObjectURL(wavBlob);
+                                clonedTestObjectUrlRef.current = synthesizedPreviewUrl;
+                              }
+                            }
+
+                            setClonedSuccessData({
+                              voiceId: data.voice_id,
+                              displayName: finalVoiceName,
+                              isStatelessKey: Boolean(data.isStatelessKey),
+                              expireTime: data.expire_time || null,
+                              model: data.model || cloneVoiceModel,
+                              testAudioUrl: synthesizedPreviewUrl,
+                              previewWarning: data.previewWarning || undefined
+                            });
+
+                            toast({
+                              type: 'success',
+                              title: 'تم استنساخ الصوت الحقيقي بنجاح',
+                              message: `تم ربط الصوت "${finalVoiceName}" بالمعرّف (${data.voice_id}).`
+                            });
                           } catch (err: any) {
                             console.error('[Voice Replication Error]', err);
-                            // If upstream endpoint requires whitelist or specific error, handle gracefully
-                            setCloningError(err.message || 'حدث خطأ أثناء الاتصال بمحرك استنساخ الصوت. تحقق من اتصالك أو المفتاح المستخدم.');
+                            const rawMsg = String(err?.message || '');
+                            const isNetworkDrop = err?.name === 'TypeError' || rawMsg.toLowerCase().includes('failed to fetch') || rawMsg.toLowerCase().includes('networkerror');
+                            if (isNetworkDrop) {
+                              let serverReachable = false;
+                              try {
+                                const hRes = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
+                                serverReachable = hRes.ok;
+                              } catch {
+                                serverReachable = false;
+                              }
+                              setCloningError(
+                                serverReachable
+                                  ? 'انقطع اتصال الطلب بالخادم الوسيط أثناء إرسال البيانات الصوتية. حاول إعادة تحديث الصفحة أو تقصير مدة التسجيل قليلاً ثم أعد المحاولة.'
+                                  : 'تعذر الوصول إلى خادم التطبيق (تحقق من اتصالك بالإنترنت أو أعد تحديث الصفحة لتجديد الجلسة).'
+                              );
+                            } else {
+                              setCloningError(rawMsg || 'حدث خطأ أثناء الاتصال بمحرك استنساخ الصوت. تحقق من المفتاح أو نص الموافقة.');
+                            }
                           } finally {
                             setIsCloning(false);
                           }
                         }}
-                        className={`w-full py-3 px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-lg transition-all ${
-                          isCloning || !voiceDisplayName.trim() || !sourceAudioFile || !consentAudioFile
+                        className={`w-full py-3.5 px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-lg transition-all ${
+                          isCloning || !sourceAudioFile || !consentAudioFile
                             ? 'bg-surface border border-border text-muted cursor-not-allowed opacity-60'
-                            : 'bg-gradient-to-r from-accent to-accent2 hover:opacity-95 text-bg cursor-pointer active:scale-[0.99]'
+                            : 'bg-gradient-to-r from-accent to-accent2 hover:opacity-95 text-bg cursor-pointer active:scale-[0.99] ring-2 ring-accent/30'
                         }`}
                       >
                         {isCloning ? (
                           <>
                             <Loader2 size={16} className="animate-spin" />
-                            <span>جارِ الاستنساخ والتحقق البيومتري...</span>
+                            <span>جارِ الاستنساخ والتحقق البيومتري عبر Gemini...</span>
                           </>
                         ) : (
                           <>
@@ -1268,26 +1509,37 @@ export default function SettingsModal({
                       return a.localeCompare(b, 'ar');
                     }).map((v) => {
                       const isCustom = !VOICE_GENDERS[v];
+                      const hasRealClonedId = isCustom && Boolean(getClonedVoiceId(v));
                       return (
                         <div
                           key={v}
                           className={`p-2.5 rounded-xl flex items-center justify-between gap-2 border transition-all ${
-                            isCustom
+                            hasRealClonedId
                               ? 'bg-emerald-500/10 border-emerald-500/40 shadow-sm'
+                              : isCustom
+                              ? 'bg-amber-500/10 border-amber-500/40 shadow-sm'
                               : 'bg-surface border-border/60'
                           }`}
                         >
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-1.5">
                               <span className="text-xs font-bold text-text truncate block">{v}</span>
-                              {isCustom && (
+                              {hasRealClonedId ? (
                                 <span className="text-[9px] bg-emerald-500/20 text-emerald-300 font-bold px-1.5 py-0.2 rounded border border-emerald-500/30 shrink-0">
-                                  مستنسخ ✨
+                                  مستنسخ حقيقي ✓
                                 </span>
-                              )}
+                              ) : isCustom ? (
+                                <span className="text-[9px] bg-amber-500/20 text-amber-300 font-bold px-1.5 py-0.2 rounded border border-amber-500/30 shrink-0">
+                                  غير مرتبط
+                                </span>
+                              ) : null}
                             </div>
-                            <span className="text-[9px] text-muted font-mono block mt-0.5">
-                              {VOICE_GENDERS[v] || 'صوتك المخصص الحقيقي'}
+                            <span className="text-[9px] text-muted font-mono block mt-0.5 truncate">
+                              {hasRealClonedId
+                                ? `معرّف Gemini: ${getClonedVoiceId(v)}`
+                                : isCustom
+                                ? 'أعد الاستنساخ للربط الحقيقي'
+                                : VOICE_GENDERS[v]}
                             </span>
                           </div>
 
@@ -1526,6 +1778,14 @@ export default function SettingsModal({
             cancelText="إلغاء الأمر"
             onConfirm={() => {
               if (voiceToDelete) {
+                const removed = removeClonedVoice(voiceToDelete);
+                if (removed?.voiceId && !removed.isStatelessKey) {
+                  fetch(`/api/voices/${encodeURIComponent(removed.voiceId)}`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiKey: apiKey || '' })
+                  }).catch(() => {});
+                }
                 const updated = dynamicVoices.filter(item => item !== voiceToDelete);
                 safeStorage.setItem('mindmirror_dynamicVoices', JSON.stringify(updated));
                 onVoiceRemoved?.(voiceToDelete);

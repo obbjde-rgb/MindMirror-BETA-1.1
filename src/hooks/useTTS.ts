@@ -5,6 +5,7 @@ import { playAudioBase64, base64ToPCM16, downloadBlob, AudioPlaybackContext, cle
 import { withRetry, checkIsRateLimited, checkIsQuotaExceeded, sanitizeApiKey, getGeminiClient } from '../utils/gemini';
 import { logger } from '../utils/logger';
 import { useToast } from '../components/Toast';
+import { buildSpeechVoiceConfig, getClonedVoiceId } from '../utils/clonedVoices';
 
 interface UseTTSProps {
   apiKey: string;
@@ -103,8 +104,13 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
   }, [toast]);
 
   const generateTTS = useCallback(async (text: string, personaKey: string, signal: AbortSignal): Promise<string | null> => {
-    // Versioned cache key (tts_v3) ensures no legacy unstripped audio chunks can ever be served
-    const cacheKey = `tts_v3_${personaKey}_${text.substring(0, 50)}_${text.length}`;
+    const persona = personas[personaKey];
+    const voiceNameRaw = persona?.voice || 'Puck';
+    const clonedVoiceId = getClonedVoiceId(voiceNameRaw);
+    const voiceCacheTag = clonedVoiceId || voiceNameRaw;
+
+    // Versioned cache key (tts_v4) includes active voice so switching voices never serves stale audio
+    const cacheKey = `tts_v4_${personaKey}_${voiceCacheTag}_${text.substring(0, 50)}_${text.length}`;
     
     // Check Memory Cache first
     if (audioCacheRef.current[cacheKey]) {
@@ -131,28 +137,8 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
     const promise = (async () => {
       try {
         const ai = getGeminiClient(apiKey);
-        logger.info(`Initializing TTS request for persona: ${personaKey}`, { model: audioModel });
-        const persona = personas[personaKey];
-        const voiceNameRaw = persona?.voice || 'Puck';
-        const tone = persona?.ttsTone || 'تلقائي';
-        const personaPrompt = persona?.prompt || '';
-        
-        // Gemini API supports prebuilt voices: Puck, Charon, Kore, Fenrir, Aoede, Zephyr
-        const geminiAllowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'];
-        let voiceName = 'Puck';
-        
-        const foundVoice = geminiAllowedVoices.find(v => v.toLowerCase() === voiceNameRaw.toLowerCase());
-        if (foundVoice) {
-          voiceName = foundVoice;
-        } else {
-          // Deterministic mapping from the 30 list to one of the supported voices
-          let hash = 0;
-          for (let i = 0; i < voiceNameRaw.length; i++) {
-            hash = voiceNameRaw.charCodeAt(i) + ((hash << 5) - hash);
-          }
-          const index = Math.abs(hash) % geminiAllowedVoices.length;
-          voiceName = geminiAllowedVoices[index];
-        }
+        logger.info(`Initializing TTS request for persona: ${personaKey}`, { model: audioModel, voice: voiceNameRaw, clonedVoiceId });
+        const voiceConfigPayload = buildSpeechVoiceConfig(voiceNameRaw);
         
         const cleanText = text
           .replace(/```[\s\S]*?```/g, '') // Remove code blocks
@@ -165,12 +151,18 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
         }
 
         let response: any;
-        const candidateAudioModels = Array.from(new Set([
-          audioModel || 'gemini-3.8-flash-tts',
-          'gemini-3.8-flash-tts',
-          'gemini-3.8-flash-lite-tts',
-          'gemini-3.1-flash-tts-preview'
-        ]));
+        const candidateAudioModels = clonedVoiceId
+          ? Array.from(new Set([
+              ...((audioModel === 'gemini-3.8-flash-tts' || audioModel === 'gemini-3.8-flash-lite-tts') ? [audioModel] : []),
+              'gemini-3.8-flash-tts',
+              'gemini-3.8-flash-lite-tts'
+            ]))
+          : Array.from(new Set([
+              audioModel || 'gemini-3.8-flash-tts',
+              'gemini-3.8-flash-tts',
+              'gemini-3.8-flash-lite-tts',
+              'gemini-3.1-flash-tts-preview'
+            ]));
 
         let lastTTSModelError: any = null;
         for (const modelCandidate of candidateAudioModels) {
@@ -182,9 +174,7 @@ export const useTTS = ({ apiKey, personas, ttsVolume, ttsSpeed, audioModel }: Us
               config: {
                 responseModalities: ["AUDIO"],
                 speechConfig: {
-                  voiceConfig: {
-                    prebuiltVoiceConfig: { voiceName: voiceName },
-                  },
+                  voiceConfig: voiceConfigPayload,
                 },
               },
             }), 2, 1500);

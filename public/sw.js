@@ -1,5 +1,5 @@
 // MindMirror Live 2026 - Production Service Worker (2026 High-Performance Standard)
-const CACHE_VERSION = 'mindmirror-2026-v31';
+const CACHE_VERSION = 'mindmirror-2026-v32';
 const STATIC_CACHE_NAME = `static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE_NAME = `dynamic-${CACHE_VERSION}`;
 

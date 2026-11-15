@@ -18,6 +18,7 @@ import {
 } from '../utils/podLiveAudioEngine';
 import { getGeminiClient, withRetry, parseJsonSafely } from '../utils/gemini';
 import { copyToClipboard } from '../utils/clipboard';
+import { buildSpeechVoiceConfig } from '../utils/clonedVoices';
 import { useToast } from './Toast';
 
 export interface PodLiveTurn {
@@ -339,8 +340,7 @@ ${g2 ? `3. الضيف الثاني: "${g2}" (المفتاح: "${guest2Key}")` : 
       const ai = getGeminiClient(apiKey);
       const persona = personas[turn.speakerKey];
       const personaVoice = persona?.voice || 'Puck';
-      const allowedVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'];
-      let voiceName = allowedVoices.find(v => v.toLowerCase() === personaVoice.toLowerCase()) || 'Puck';
+      const voiceConfigPayload = buildSpeechVoiceConfig(personaVoice);
 
       // Clean text for speech synthesis by stripping bracketed and angled SFX tags so TTS speaks naturally
       const speechText = turn.text
@@ -359,7 +359,7 @@ ${g2 ? `3. الضيف الثاني: "${g2}" (المفتاح: "${guest2Key}")` : 
             contents: speechText || 'مرحباً',
             config: {
               responseModalities: ['AUDIO'],
-              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } }
+              speechConfig: { voiceConfig: voiceConfigPayload }
             }
           }), 2, 1000);
 

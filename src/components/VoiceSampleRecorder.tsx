@@ -313,9 +313,24 @@ export const VoiceSampleRecorder: React.FC<VoiceSampleRecorderProps> = ({
     setAudioWaveLevels(new Array(16).fill(10));
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = e.target.files?.[0];
-    if (uploadedFile) {
+    if (!uploadedFile) return;
+    setErrorMsg(null);
+    try {
+      const arrayBuffer = await uploadedFile.arrayBuffer();
+      const DecodeCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const decodeCtx = new DecodeCtx();
+      try {
+        const audioBuffer = await decodeCtx.decodeAudioData(arrayBuffer.slice(0));
+        const wavBlob = await convertToHighFidelityWav(audioBuffer);
+        const convertedFile = new File([wavBlob], `${type}_uploaded_${Date.now()}.wav`, { type: 'audio/wav' });
+        onAudioReady(convertedFile);
+      } finally {
+        decodeCtx.close().catch(() => {});
+      }
+    } catch (err) {
+      console.warn('[Upload WAV Normalization] Using original uploaded file:', err);
       onAudioReady(uploadedFile);
     }
   };
@@ -526,6 +541,15 @@ export const VoiceSampleRecorder: React.FC<VoiceSampleRecorderProps> = ({
               style={{ width: `${playbackProgress}%` }}
             />
           </div>
+
+          {audioDuration !== null && Math.round(audioDuration) < minDurationSeconds && (
+            <div className="text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5">
+              <AlertCircle size={12} className="shrink-0 text-amber-400" />
+              <span>
+                مدة التسجيل ({Math.round(audioDuration)}ث) أقل من الموصى به ({minDurationSeconds}ث على الأقل). يُفضل إعادة التسجيل لتجنب رفض المطابقة من Google.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
