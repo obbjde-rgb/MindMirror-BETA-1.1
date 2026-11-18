@@ -19,7 +19,8 @@ export const normalizeGeminiModel = (modelName?: string | null): string => {
     clean === 'gemini-pro' || 
     clean === 'gemini-flash' || 
     clean === 'gemini-1.5-flash' ||
-    clean === 'gemini-1.5-pro'
+    clean === 'gemini-1.5-pro' ||
+    clean === 'gemini-3.8-flash'
   ) {
     return DEFAULT_MODEL;
   }

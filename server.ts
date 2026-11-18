@@ -126,6 +126,7 @@ async function startServer() {
 
   const TEXT_CASCADE = [
     'gemini-3-flash-preview',
+    'gemini-4-hydrogen',
     'gemini-3.1-flash-lite',
     'gemini-3.5-flash-lite',
     'gemini-robotics-er-2-preview'
@@ -138,7 +139,10 @@ async function startServer() {
   ];
 
   async function callGemini(method: 'generateContent' | 'generateContentStream', params: any, clientApiKey?: string) {
-    const rawModel = (params?.model || 'gemini-3-flash-preview').replace(/^models\//, '').replace(/^tunedModels\//, '').trim();
+    let rawModel = (params?.model || 'gemini-3-flash-preview').replace(/^models\//, '').replace(/^tunedModels\//, '').trim();
+    if (rawModel === 'gemini-3.8-flash') {
+      rawModel = 'gemini-3-flash-preview';
+    }
     const isStrict = Boolean(
       params?.strictModel === true || 
       params?.isStrict === true || 
@@ -165,8 +169,8 @@ async function startServer() {
       return cdA - cdB;
     });
 
-    // 9s timeout for text requests to allow fast cascading if a model hangs or is overloaded
-    const timeoutMs = isAudioRequest ? 45000 : 9000;
+    // 22s timeout for text requests to handle longer Arabic outputs cleanly without premature 9s timeouts
+    const timeoutMs = isAudioRequest ? 45000 : 22000;
 
     let lastError: any = null;
 
@@ -318,7 +322,7 @@ async function startServer() {
             const isNotFound = errMsg.includes('404') || errMsg.includes('not found') || errMsg.includes('501');
             const isTimeout = errMsg.includes('Timeout') || errMsg.includes('timeout') || errMsg.includes('aborted');
 
-            console.warn(`[Pass ${pass}] Model ${model} failed on ${apiKey ? '***' + apiKey.slice(-4) : 'INTERNAL'}:`, errMsg.slice(0, 100));
+            console.info(`[Pass ${pass}] Model ${model} fallback on ${apiKey ? '***' + apiKey.slice(-4) : 'INTERNAL'}:`, errMsg.slice(0, 100));
 
             if (isStrict) {
               console.info(`[Strict Mode Enforced] Model ${model} failed (${errMsg.slice(0, 80)}). Model fallback strictly disabled.`);
@@ -369,7 +373,7 @@ async function startServer() {
       systemKeysCount: SYSTEM_KEYS.length,
       activeKeysInPool: pool.length,
       keysInCooldown: keyCooldowns.size,
-      defaultModel: 'gemini-3.8-flash'
+      defaultModel: 'gemini-3-flash-preview'
     });
   });
 
@@ -405,7 +409,8 @@ async function startServer() {
         }
         
         // Ensure verified key models are always in the list
-        seenModels.add('gemini-3.8-flash');
+        seenModels.add('gemini-3-flash-preview');
+        seenModels.add('gemini-4-hydrogen');
         seenModels.add('gemini-3.1-flash-lite');
         seenModels.add('gemini-4-argon');
         seenModels.add('gemini-flash-latest');
@@ -426,7 +431,8 @@ async function startServer() {
     // Always guarantee complete list of valid models
     return res.json({ 
       models: [
-        'gemini-3.8-flash',
+        'gemini-3-flash-preview',
+        'gemini-4-hydrogen',
         'gemini-3.1-flash-lite',
         'gemini-4-argon',
         'gemini-flash-latest'
@@ -1220,10 +1226,10 @@ async function startServer() {
 قم بتحليل النمط واستخدام Google Search Grounding لإيجاد الربط البصري الدقيق وإرجاع JSON مطابق للمطلوب.`;
 
     const candidateConfigs = [
-      { model: "gemini-3.8-flash", useTools: true },
+      { model: "gemini-3-flash-preview", useTools: true },
+      { model: "gemini-4-hydrogen", useTools: true },
       { model: "gemini-3.1-flash-lite", useTools: true },
-      { model: "gemini-4-argon", useTools: true },
-      { model: "gemini-3.8-flash", useTools: false }
+      { model: "gemini-3-flash-preview", useTools: false }
     ];
 
     let searchResp: any = null;
@@ -1474,7 +1480,7 @@ async function startServer() {
     }
 
     let responseText = "";
-    const candidateModels = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-4-argon"];
+    const candidateModels = ["gemini-3-flash-preview", "gemini-4-hydrogen", "gemini-3.1-flash-lite"];
 
     const systemInstruction = `أنت خبير تحليل ومعالجة الصور بالذكاء الاصطناعي. وظيفتك تقديم تحليل بصري دقيق، واستخراج العناصر الفنية والتاريخية، وتوليد وصف مخصص محسّن (Enhanced Prompt) لتوليد نسخة عالية الجودة. أعد نتيجتك بصيغة JSON:
 {

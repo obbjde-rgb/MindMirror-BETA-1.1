@@ -100,9 +100,16 @@ export const GroupLiveConversationModal: React.FC<GroupLiveConversationModalProp
 
   const rebuildOutputPipeline = (audioCtx: AudioContext, tone: 'normal' | 'warm' | 'sharp' | 'robot', vol: number) => {
     try {
+      if (audioCtx.state === 'closed') return;
       outputFiltersRef.current.forEach(n => { try { n.disconnect(); } catch {} });
       outputFiltersRef.current = [];
-      if (!outputGainRef.current) {
+      // CRITICAL: If outputGainRef belongs to a previous/closed AudioContext (e.g. StrictMode remount),
+      // discard and recreate it on the current audioCtx to prevent InvalidAccessError.
+      if (!outputGainRef.current || outputGainRef.current.context !== audioCtx) {
+        if (outputGainRef.current) {
+          try { outputGainRef.current.disconnect(); } catch {}
+        }
+        outputInputNodeRef.current = null;
         const gain = audioCtx.createGain();
         gain.gain.value = vol / 100;
         gain.connect(audioCtx.destination);
@@ -166,7 +173,12 @@ export const GroupLiveConversationModal: React.FC<GroupLiveConversationModalProp
 
   useEffect(() => {
     volumeRef.current = volume;
-    if (outputGainRef.current && audioCtxRef.current) {
+    if (
+      outputGainRef.current &&
+      audioCtxRef.current &&
+      audioCtxRef.current.state !== 'closed' &&
+      outputGainRef.current.context === audioCtxRef.current
+    ) {
       outputGainRef.current.gain.setTargetAtTime(volume / 100, audioCtxRef.current.currentTime, 0.015);
     }
   }, [volume]);
@@ -177,7 +189,11 @@ export const GroupLiveConversationModal: React.FC<GroupLiveConversationModalProp
 
   useEffect(() => {
     toneStyleRef.current = toneStyle;
-    if (audioCtxRef.current && activeToneBuiltRef.current !== toneStyle) {
+    if (
+      audioCtxRef.current &&
+      audioCtxRef.current.state !== 'closed' &&
+      activeToneBuiltRef.current !== toneStyle
+    ) {
       rebuildOutputPipeline(audioCtxRef.current, toneStyle, volumeRef.current);
     }
   }, [toneStyle]);
@@ -312,18 +328,18 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
         wsRef.current = ws;
 
         const outputAudioCtx = createAudioContextSafe(24000);
-        if (outputAudioCtx.state === 'suspended') {
-          await outputAudioCtx.resume();
-        }
         audioCtxRef.current = outputAudioCtx;
+        if (outputAudioCtx.state === 'suspended') {
+          outputAudioCtx.resume().catch(() => {});
+        }
         rebuildOutputPipeline(outputAudioCtx, toneStyleRef.current, volumeRef.current);
         nextStartTimeRef.current = outputAudioCtx.currentTime;
 
         const inputAudioCtx = createAudioContextSafe(16000);
-        if (inputAudioCtx.state === 'suspended') {
-          await inputAudioCtx.resume();
-        }
         inputCtxRef.current = inputAudioCtx;
+        if (inputAudioCtx.state === 'suspended') {
+          inputAudioCtx.resume().catch(() => {});
+        }
 
         ws.onopen = () => {
           logger.info("Connected to Live API bridge (Group Mode with 16kHz DSP).");
@@ -617,6 +633,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
 
     return () => {
       active = false;
+      stopAllActiveAudio();
       if (wsRef.current) wsRef.current.close();
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
@@ -624,12 +641,32 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
       if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
       if (workletRef.current) {
         try { workletRef.current.disconnect(); } catch (e) {}
+        workletRef.current = null;
       }
-      if (processorRef.current) processorRef.current.disconnect();
-      if (analyserRef.current) analyserRef.current.disconnect();
+      if (processorRef.current) {
+        try { processorRef.current.disconnect(); } catch (e) {}
+        processorRef.current = null;
+      }
+      if (analyserRef.current) {
+        try { analyserRef.current.disconnect(); } catch (e) {}
+        analyserRef.current = null;
+      }
+      outputFiltersRef.current.forEach(n => { try { n.disconnect(); } catch {} });
+      outputFiltersRef.current = [];
+      if (outputGainRef.current) {
+        try { outputGainRef.current.disconnect(); } catch {}
+        outputGainRef.current = null;
+      }
+      outputInputNodeRef.current = null;
       if (aiSpeakingTimeoutRef.current) clearTimeout(aiSpeakingTimeoutRef.current);
-      if (inputCtxRef.current) inputCtxRef.current.close();
-      if (audioCtxRef.current) audioCtxRef.current.close();
+      if (inputCtxRef.current) {
+        inputCtxRef.current.close().catch(() => {});
+        inputCtxRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
     };
   }, [participants, mode, topic]);
 
@@ -667,13 +704,14 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
 
   const playAudioChunk = (audioCtx: AudioContext, base64Audio: string) => {
     try {
+      if (audioCtx.state === 'closed') return;
       if (audioCtx.state === 'suspended') {
         audioCtx.resume().catch(() => {});
       }
       const { float32Array, sampleRate } = extractStreamingPcmFromBase64(base64Audio);
       if (float32Array.length === 0) return;
 
-      if (!outputInputNodeRef.current) {
+      if (!outputInputNodeRef.current || outputInputNodeRef.current.context !== audioCtx || outputGainRef.current?.context !== audioCtx) {
         rebuildOutputPipeline(audioCtx, toneStyleRef.current, volumeRef.current);
       }
 
@@ -697,7 +735,9 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
       const currentRate = speechRateRef.current || 1.0;
       source.playbackRate.value = currentRate;
 
-      const targetNode = outputInputNodeRef.current || audioCtx.destination;
+      const targetNode = (outputInputNodeRef.current && outputInputNodeRef.current.context === audioCtx)
+        ? outputInputNodeRef.current
+        : audioCtx.destination;
       source.connect(targetNode);
 
       // Track source node
@@ -719,6 +759,9 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
 
   const sendTextMessage = (text: string) => {
     if (!text.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
     
     // Stop playing audio instantly
     stopAllActiveAudio();
@@ -793,6 +836,11 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
 
   return (
     <div 
+      onPointerDown={() => {
+        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+        }
+      }}
       className={`fixed inset-0 z-[1000] flex items-center justify-center p-2 md:p-4 bg-[#02040a]/95 backdrop-blur-md overflow-y-auto overflow-x-hidden ${
         isKeyboardOpen ? 'items-start pt-1' : ''
       }`}
