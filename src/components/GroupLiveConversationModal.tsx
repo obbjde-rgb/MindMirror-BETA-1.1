@@ -92,6 +92,15 @@ export const GroupLiveConversationModal: React.FC<GroupLiveConversationModalProp
   const outputFiltersRef = useRef<AudioNode[]>([]);
   const activeToneBuiltRef = useRef<string>('normal');
   const aiSpeakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isAiSpeakingRef = useRef<boolean>(false);
+
+  // Spoken voice turn tracking
+  const lastSpokenSentTextRef = useRef<string>('');
+  const lastSpokenSentTimeRef = useRef<number>(0);
+  const speechSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestSpokenInterimRef = useRef<string>('');
+  const hadSpeechActivityRef = useRef<boolean>(false);
+  const lastSpeechTimestampRef = useRef<number>(0);
   
   // Track all active scheduled AudioBufferSourceNodes so we can stop them instantly upon interruption
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -219,6 +228,38 @@ export const GroupLiveConversationModal: React.FC<GroupLiveConversationModalProp
     if (audioCtxRef.current) {
       nextStartTimeRef.current = audioCtxRef.current.currentTime;
     }
+    setIsAiSpeaking(false);
+    isAiSpeakingRef.current = false;
+  };
+
+  const sendTextMessage = (text: string) => {
+    if (!text.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+    
+    // Stop playing audio instantly
+    stopAllActiveAudio();
+    
+    wsRef.current.send(JSON.stringify({ text: text.trim() }));
+    setTranscript(prev => [...prev, { role: 'user', text: text.trim() }]);
+  };
+
+  const commitSpokenTurn = (text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    const now = Date.now();
+    // Prevent duplicate triggers if identical phrase was committed within 2.5 seconds
+    if (clean === lastSpokenSentTextRef.current && (now - lastSpokenSentTimeRef.current < 2500)) {
+      return;
+    }
+    lastSpokenSentTextRef.current = clean;
+    lastSpokenSentTimeRef.current = now;
+    latestSpokenInterimRef.current = '';
+    setLiveInterimCaption('');
+    
+    logger.info("Auto-submitting recognized voice turn to Group Live:", clean);
+    sendTextMessage(clean);
   };
 
   useEffect(() => {
@@ -369,6 +410,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
             } else if (msg.audio) {
               playAudioChunk(outputAudioCtx, msg.audio);
               setIsAiSpeaking(true);
+              isAiSpeakingRef.current = true;
               if (aiSpeakingTimeoutRef.current) {
                 clearTimeout(aiSpeakingTimeoutRef.current);
               }
@@ -376,6 +418,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
               aiSpeakingTimeoutRef.current = setTimeout(() => {
                 if (active && activeSourcesRef.current.length === 0) {
                   setIsAiSpeaking(false);
+                  isAiSpeakingRef.current = false;
                 }
               }, remainingMs);
             } else if (msg.text) {
@@ -508,6 +551,18 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
                   const level = Math.min(100, Math.round(rms * 450));
                   setUserMicLevel(level);
                   setIsUserSpeaking(level > 6);
+
+                  // Detect speech activity & silence for raw PCM VAD fallback
+                  if (level > 8 && !isAiSpeakingRef.current) {
+                    hadSpeechActivityRef.current = true;
+                    lastSpeechTimestampRef.current = nowMs;
+                  } else if (hadSpeechActivityRef.current && (nowMs - lastSpeechTimestampRef.current > 1100)) {
+                    hadSpeechActivityRef.current = false;
+                    // If SpeechRecognition didn't commit a turn recently, send endOfSpeech to prompt Gemini Live
+                    if (Date.now() - lastSpokenSentTimeRef.current > 1500 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ endOfSpeech: true }));
+                    }
+                  }
                 }
 
                 const resampled = resampleTo16000(inputData, currInputCtx.sampleRate, currentGain);
@@ -564,7 +619,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
             };
 
             recognition.onresult = (event: any) => {
-              if (!active) return;
+              if (!active || isAiSpeakingRef.current) return;
               let interim = '';
               let final = '';
               for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -575,10 +630,22 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
                 }
               }
               if (interim) {
+                latestSpokenInterimRef.current = interim;
                 setLiveInterimCaption(interim);
+
+                // Auto-commit safety timer if user finished speaking and browser delays isFinal
+                if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
+                speechSilenceTimerRef.current = setTimeout(() => {
+                  if (!active || isAiSpeakingRef.current) return;
+                  const candidate = latestSpokenInterimRef.current.trim();
+                  if (candidate && candidate.length >= 2 && candidate !== lastSpokenSentTextRef.current) {
+                    commitSpokenTurn(candidate);
+                  }
+                }, 1100);
               }
               if (final && final.trim()) {
-                setLiveInterimCaption('');
+                if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
+                commitSpokenTurn(final.trim());
               }
             };
 
@@ -595,6 +662,12 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
 
             recognition.onend = () => {
               isRecognitionRunning = false;
+              if (active && !isAiSpeakingRef.current) {
+                const pending = latestSpokenInterimRef.current.trim();
+                if (pending && pending.length >= 2 && pending !== lastSpokenSentTextRef.current) {
+                  commitSpokenTurn(pending);
+                }
+              }
               if (active && !isMutedRef.current && !hasRecognitionPermissionDenied) {
                 setTimeout(() => {
                   if (active && !isMutedRef.current && !hasRecognitionPermissionDenied && !isRecognitionRunning) {
@@ -634,6 +707,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
     return () => {
       active = false;
       stopAllActiveAudio();
+      if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
       if (wsRef.current) wsRef.current.close();
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
@@ -747,6 +821,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
         try { source.disconnect(); } catch {}
         if (activeSourcesRef.current.length === 0) {
           setIsAiSpeaking(false);
+          isAiSpeakingRef.current = false;
         }
       };
 
@@ -757,18 +832,7 @@ ${topic ? `محور الندوة الرئيسي: "${topic}"` : 'استعرضوا
     }
   };
 
-  const sendTextMessage = (text: string) => {
-    if (!text.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
-    }
-    
-    // Stop playing audio instantly
-    stopAllActiveAudio();
-    
-    wsRef.current.send(JSON.stringify({ text: text.trim() }));
-    setTranscript(prev => [...prev, { role: 'user', text: text.trim() }]);
-  };
+
 
   if (isMinimized) {
     return (

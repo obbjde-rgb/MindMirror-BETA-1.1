@@ -1975,11 +1975,16 @@ async function startServer() {
             });
           }
           if (parsed.audio && session) {
-            // Send both media (which populates mediaChunks for MLDev/AIStudio) and audio to ensure full compatibility
             session.sendRealtimeInput({
-              media: { data: parsed.audio, mimeType: "audio/pcm;rate=16000" },
               audio: { data: parsed.audio, mimeType: "audio/pcm;rate=16000" }
             });
+          }
+          if (parsed.endOfSpeech && session) {
+            try {
+              session.sendRealtimeInput({ audioStreamEnd: true });
+            } catch (e) {
+              console.warn("[Gemini Live] Error sending audioStreamEnd:", e);
+            }
           }
           if (parsed.text && session) {
             session.sendClientContent({

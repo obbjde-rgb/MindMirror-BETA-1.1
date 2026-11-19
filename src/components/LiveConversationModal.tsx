@@ -92,6 +92,15 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
   const outputFiltersRef = useRef<AudioNode[]>([]);
   const activeToneBuiltRef = useRef<string>('normal');
   const aiSpeakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isAiSpeakingRef = useRef<boolean>(false);
+
+  // Spoken voice turn tracking
+  const lastSpokenSentTextRef = useRef<string>('');
+  const lastSpokenSentTimeRef = useRef<number>(0);
+  const speechSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestSpokenInterimRef = useRef<string>('');
+  const hadSpeechActivityRef = useRef<boolean>(false);
+  const lastSpeechTimestampRef = useRef<number>(0);
 
   // To track scheduled audio source nodes so we can stop them immediately on interruption
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -220,6 +229,38 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
     if (audioCtxRef.current) {
       nextStartTimeRef.current = audioCtxRef.current.currentTime;
     }
+    setIsAiSpeaking(false);
+    isAiSpeakingRef.current = false;
+  };
+
+  const sendTextMessage = (text: string) => {
+    if (!text.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+    
+    // Stop playing audio instantly since a message is being dispatched
+    stopAllActiveAudio();
+    
+    wsRef.current.send(JSON.stringify({ text: text.trim() }));
+    setTranscript(prev => [...prev, { role: 'user', text: text.trim() }]);
+  };
+
+  const commitSpokenTurn = (text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    const now = Date.now();
+    // Prevent duplicate triggers if identical phrase was committed within 2.5 seconds
+    if (clean === lastSpokenSentTextRef.current && (now - lastSpokenSentTimeRef.current < 2500)) {
+      return;
+    }
+    lastSpokenSentTextRef.current = clean;
+    lastSpokenSentTimeRef.current = now;
+    latestSpokenInterimRef.current = '';
+    setLiveInterimCaption('');
+    
+    logger.info("Auto-submitting recognized voice turn to Gemini Live:", clean);
+    sendTextMessage(clean);
   };
   
   const persona = personas[activePersona];
@@ -356,6 +397,7 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
             } else if (msg.audio) {
               playAudioChunk(outputAudioCtx, msg.audio);
               setIsAiSpeaking(true);
+              isAiSpeakingRef.current = true;
               if (aiSpeakingTimeoutRef.current) {
                 clearTimeout(aiSpeakingTimeoutRef.current);
               }
@@ -363,6 +405,7 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
               aiSpeakingTimeoutRef.current = setTimeout(() => {
                 if (active && activeSourcesRef.current.length === 0) {
                   setIsAiSpeaking(false);
+                  isAiSpeakingRef.current = false;
                 }
               }, remainingMs);
             } else if (msg.text) {
@@ -495,6 +538,18 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
                   const level = Math.min(100, Math.round(rms * 450));
                   setUserMicLevel(level);
                   setIsUserSpeaking(level > 6);
+
+                  // Detect speech activity & silence for raw PCM VAD fallback
+                  if (level > 8 && !isAiSpeakingRef.current) {
+                    hadSpeechActivityRef.current = true;
+                    lastSpeechTimestampRef.current = nowMs;
+                  } else if (hadSpeechActivityRef.current && (nowMs - lastSpeechTimestampRef.current > 1100)) {
+                    hadSpeechActivityRef.current = false;
+                    // If SpeechRecognition didn't commit a turn recently, send endOfSpeech to prompt Gemini Live
+                    if (Date.now() - lastSpokenSentTimeRef.current > 1500 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ endOfSpeech: true }));
+                    }
+                  }
                 }
 
                 // Resample down/up to exact 16000 Hz if hardware audioCtx is 44.1kHz or 48kHz
@@ -552,7 +607,7 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
             };
 
             recognition.onresult = (event: any) => {
-              if (!active) return;
+              if (!active || isAiSpeakingRef.current) return;
               let interim = '';
               let final = '';
               for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -563,10 +618,22 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
                 }
               }
               if (interim) {
+                latestSpokenInterimRef.current = interim;
                 setLiveInterimCaption(interim);
+
+                // Auto-commit safety timer if user finished speaking and browser delays isFinal
+                if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
+                speechSilenceTimerRef.current = setTimeout(() => {
+                  if (!active || isAiSpeakingRef.current) return;
+                  const candidate = latestSpokenInterimRef.current.trim();
+                  if (candidate && candidate.length >= 2 && candidate !== lastSpokenSentTextRef.current) {
+                    commitSpokenTurn(candidate);
+                  }
+                }, 1100);
               }
               if (final && final.trim()) {
-                setLiveInterimCaption('');
+                if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
+                commitSpokenTurn(final.trim());
               }
             };
 
@@ -583,6 +650,12 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
 
             recognition.onend = () => {
               isRecognitionRunning = false;
+              if (active && !isAiSpeakingRef.current) {
+                const pending = latestSpokenInterimRef.current.trim();
+                if (pending && pending.length >= 2 && pending !== lastSpokenSentTextRef.current) {
+                  commitSpokenTurn(pending);
+                }
+              }
               if (active && !isMutedRef.current && !hasRecognitionPermissionDenied) {
                 setTimeout(() => {
                   if (active && !isMutedRef.current && !hasRecognitionPermissionDenied && !isRecognitionRunning) {
@@ -622,6 +695,7 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
     return () => {
       active = false;
       stopAllActiveAudio();
+      if (speechSilenceTimerRef.current) clearTimeout(speechSilenceTimerRef.current);
       if (wsRef.current) wsRef.current.close();
       if (recognitionRef.current) {
         try { recognitionRef.current.stop(); } catch (e) {}
@@ -735,6 +809,7 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
         try { source.disconnect(); } catch {}
         if (activeSourcesRef.current.length === 0) {
           setIsAiSpeaking(false);
+          isAiSpeakingRef.current = false;
         }
       };
 
@@ -743,19 +818,6 @@ export const LiveConversationModal: React.FC<LiveConversationModalProps> = ({ on
     } catch (e) {
       logger.error("Audio playback error", e);
     }
-  };
-
-  const sendTextMessage = (text: string) => {
-    if (!text.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
-    }
-    
-    // Stop playing audio instantly since user is entering/sending a manual message
-    stopAllActiveAudio();
-    
-    wsRef.current.send(JSON.stringify({ text: text.trim() }));
-    setTranscript(prev => [...prev, { role: 'user', text: text.trim() }]);
   };
 
   const lastMessage = transcript.length > 0 ? transcript[transcript.length - 1] : null;
